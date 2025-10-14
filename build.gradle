@@ -1,0 +1,61 @@
+plugins {
+    id("java")
+    id("org.jetbrains.intellij.platform") version "2.4.0"
+}
+
+group = "cn.com.wewell"
+version = "1.0-SNAPSHOT"
+
+repositories {
+//    maven { url 'https://maven.aliyun.com/repository/central/'}
+//    maven { url 'https://maven.aliyun.com/repository/public/' }
+//    maven { url 'https://maven.aliyun.com/repository/google/' }
+//    maven { url 'https://maven.aliyun.com/repository/jcenter/'}
+//    maven { url 'https://maven.aliyun.com/repository/gradle-plugin'}
+        mavenCentral()
+    intellijPlatform {
+        // 加入 JetBrains 推荐的一组仓库（平台、Marketplace、本地等）
+        defaultRepositories()
+    }
+}
+dependencies {
+    intellijPlatform {
+        // 使用本地安装的 IntelliJ IDEA 作为目标平台
+        local("D:/dev/ideaIC-2025.1.win")
+
+        // 依赖 IDE 自带（bundled）的插件
+        bundledPlugins("com.intellij.java", "Git4Idea","com.intellij.modules.json")
+    }
+}
+
+intellijPlatform {
+    // 这里配置写回到 plugin.xml（由 patchPluginXml 任务完成）
+    pluginConfiguration {
+        ideaVersion {
+            sinceBuild = "243"
+            untilBuild = "251.*"   // 覆盖 2025.1 全部小版本
+        }
+    }
+
+    // 发布到 Marketplace 的 token
+    publishing {
+        token = System.getenv("PUBLISH_TOKEN")
+    }
+
+    // Marketplace ZIP 签名（2.x 中在 signing 块，而非旧版的 publish/signPlugin）
+    signing {
+        certificateChain = System.getenv("CERTIFICATE_CHAIN")
+        privateKey       = System.getenv("PRIVATE_KEY")
+        password         = System.getenv("PRIVATE_KEY_PASSWORD")
+    }
+}
+
+// 使用 JDK 21 运行 Gradle，但将编译目标锁到 Java 17（IDEA 2025.1 主体为 17）
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = "UTF-8"
+}

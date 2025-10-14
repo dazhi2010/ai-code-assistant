@@ -1,0 +1,62 @@
+<idea-plugin>
+    <id>cn.com.wewell.ai-code-assistant</id>
+    <name>Ai-code-assistant</name>
+    <vendor url="http://www.wewell.com.cn">WeWell</vendor>
+    <description>
+        <![CDATA[
+        这是一个基于AI的代码助手插件，用于在IntelliJ IDEA中快速生成代码。
+        <br>
+        <em>most HTML tags may be used</em>
+      ]]>
+    </description>
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.java</depends>
+    <depends>com.intellij.modules.json</depends>
+    <depends>Git4Idea</depends>
+    <extensions defaultExtensionNs="com.intellij">
+        <projectService serviceImplementation="cn.com.wewell.aicodeassistant.service.PromptManager"/>
+        <projectService serviceImplementation="cn.com.wewell.aicodeassistant.service.ChangeApplierService"/>
+        <projectService serviceImplementation="cn.com.wewell.aicodeassistant.service.DiffPresentationService"/>
+        <projectService serviceImplementation="cn.com.wewell.aicodeassistant.service.HistoryManager"/>
+        <!-- 工具窗口 -->
+        <toolWindow id="Yuqf AI Assistant"
+                    anchor="right"
+                    factoryClass="cn.com.wewell.aicodeassistant.ui.AssistantToolWindowFactory"
+                    icon="/pluginIcon.svg"/>
+
+
+        <!-- 通知组 -->
+        <notificationGroup id="Yuqf AI Assistant Notifications"
+                           displayType="BALLOON"/>
+    </extensions>
+
+    <actions>
+        <!-- 编辑器右键菜单 -->
+        <action id="AddToAIAssistant"
+                class="cn.com.wewell.aicodeassistant.action.AddToAssistantAction"
+                text="Add to AI Assistant"
+                description="Add selected code to AI Assistant">
+            <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+            <keyboard-shortcut keymap="$default"
+                               first-keystroke="ctrl shift A"/>
+        </action>
+        <!-- 工具窗口的 Action Group -->
+        <group id="AIAssistant.ToolWindowActions" popup="false">
+            <action id="AIAssistant.GeneratePrompt"
+                    class="cn.com.wewell.aicodeassistant.action.toolwindow.GeneratePromptAction"
+                    text="生成提示词" description="将当前内容包装成完整的AI提示词" icon="AllIcons.Actions.Execute"/>
+            <action id="AIAssistant.CopyPrompt"
+                    class="cn.com.wewell.aicodeassistant.action.toolwindow.CopyPromptAction"
+                    text="复制" description="复制输入区内容到剪贴板" icon="AllIcons.Actions.Copy"/>
+            <action id="AIAssistant.PasteResponse"
+                    class="cn.com.wewell.aicodeassistant.action.toolwindow.PasteResponseAction"
+                    text="粘贴" description="从剪贴板粘贴AI响应" icon="AllIcons.Actions.MenuPaste"/>
+            <action id="AIAssistant.ParseResponse"
+                    class="cn.com.wewell.aicodeassistant.action.toolwindow.ParseResponseAction"
+                    text="解析" description="解析AI响应并预览变更" icon="AllIcons.Actions.Find"/>
+            <action id="AIAssistant.ClearAll"
+                    class="cn.com.wewell.aicodeassistant.action.toolwindow.ClearAllAction"
+                    text="清空" description="清空所有内容" icon="AllIcons.Actions.GC"/>
+        </group>
+    </actions>
+</idea-plugin>
