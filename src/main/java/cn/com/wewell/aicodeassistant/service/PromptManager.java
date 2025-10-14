@@ -81,6 +81,11 @@ public final class PromptManager {
         notifyInputListener();
     }
 
+    public void addText(String text) {
+        inputContent.append(text);
+        notifyInputListener();
+    }
+
     public void syncInputContent(String content) {
         if (!inputContent.toString().equals(content)) {
             inputContent.setLength(0);

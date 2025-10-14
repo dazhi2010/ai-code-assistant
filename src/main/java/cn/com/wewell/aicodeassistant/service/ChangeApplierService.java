@@ -234,8 +234,20 @@ public final class ChangeApplierService {
     public VirtualFile findVirtualFile(String relativePath) {
         String projectBasePath = project.getBasePath();
         if (projectBasePath == null) return null;
-        File targetFile = new File(projectBasePath, relativePath.replace('/', File.separatorChar));
-        return LocalFileSystem.getInstance().findFileByIoFile(targetFile);
+
+        // 将相对路径转换为绝对路径
+        String fullPath = new File(projectBasePath, relativePath.replace('/', File.separatorChar)).getAbsolutePath();
+
+        // 优先使用 refreshAndFindFileByPath，因为它能更好地处理文件系统与VFS的同步问题
+        VirtualFile file = LocalFileSystem.getInstance().refreshAndFindFileByPath(fullPath);
+
+        // 如果找不到，作为后备，尝试使用 findFileByIoFile
+        if (file == null) {
+            File targetFile = new File(fullPath);
+            file = LocalFileSystem.getInstance().findFileByIoFile(targetFile);
+        }
+
+        return file;
     }
 
     private Document getDocument(String relativePath) {

@@ -40,11 +40,21 @@
             <keyboard-shortcut keymap="$default"
                                first-keystroke="ctrl shift A"/>
         </action>
+        <action id="AIAssistant.AddFilesToAssistant"
+                class="cn.com.wewell.aicodeassistant.action.AddFilesToAssistantAction"
+                text="Add to AI Assistant"
+                description="Add selected file(s)/folder(s) to AI Assistant">
+            <add-to-group group-id="ProjectViewPopupMenu" anchor="after" relative-to-action="AddToAIAssistant"/>
+        </action>
+
         <!-- 工具窗口的 Action Group -->
         <group id="AIAssistant.ToolWindowActions" popup="false">
             <action id="AIAssistant.GeneratePrompt"
                     class="cn.com.wewell.aicodeassistant.action.toolwindow.GeneratePromptAction"
                     text="生成提示词" description="将当前内容包装成完整的AI提示词" icon="AllIcons.Actions.Execute"/>
+            <action id="AIAssistant.GenerateProjectTree"
+                    class="cn.com.wewell.aicodeassistant.action.toolwindow.GenerateProjectTreeAction"
+                    text="目录结构" description="生成项目目录结构树" icon="AllIcons.Actions.ProjectDirectory"/>
             <action id="AIAssistant.CopyPrompt"
                     class="cn.com.wewell.aicodeassistant.action.toolwindow.CopyPromptAction"
                     text="复制" description="复制输入区内容到剪贴板" icon="AllIcons.Actions.Copy"/>

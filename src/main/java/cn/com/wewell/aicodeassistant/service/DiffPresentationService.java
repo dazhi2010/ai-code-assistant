@@ -54,7 +54,7 @@ public final class DiffPresentationService {
         // 2. 创建左侧内容
         DiffContent content1 = DiffContentFactory.getInstance().create(project, diffData.originalContent, file != null ? file.getFileType() : null);
 
-        // 3. 通过字符串操作创建右侧预览内容
+        // 3. 通过纯字符串操作创建右侧预览内容
         String previewContent = createPreviewContentByStringManipulation(diffData.originalContent, actionsForFile);
         DiffContent content2 = DiffContentFactory.getInstance().create(project, previewContent, file != null ? file.getFileType() : null);
 
@@ -67,19 +67,25 @@ public final class DiffPresentationService {
         actions.add(new ApplyChangeAction(actionsForFile));
         request.putUserData(DiffUserDataKeys.CONTEXT_ACTIONS, actions);
 
-        // 6. 直接调用 showDiff，让平台处理显示逻辑
+        // 6. 直接调用 showDiff
         DiffManager.getInstance().showDiff(project, request);
     }
 
+    /**
+     * 最终解决方案：完全通过字符串操作来生成预览内容，避免任何Document对象的副作用。
+     */
     private String createPreviewContentByStringManipulation(String originalContent, List<AiResponseAction> actions) {
+        // 优先处理 OVERWRITE 和 CREATE
         AiResponseAction overwriteAction = actions.stream().filter(a -> "OVERWRITE".equalsIgnoreCase(a.action())).findFirst().orElse(null);
         if (overwriteAction != null) return overwriteAction.content();
 
         AiResponseAction createAction = actions.stream().filter(a -> "CREATE".equalsIgnoreCase(a.action())).findFirst().orElse(null);
         if (createAction != null) return createAction.content();
 
+        // 将原始文本按行分割成一个可修改的列表
         List<String> lines = new ArrayList<>(Arrays.asList(originalContent.split("\\R", -1)));
 
+        // 按行号倒序排序操作，这样在修改时不会影响前面操作的行索引
         actions.sort(Comparator.comparingInt((AiResponseAction a) -> ChangeApplierService.getInstance(project).getActionStartLine(a)).reversed());
 
         for (AiResponseAction action : actions) {
@@ -89,7 +95,12 @@ public final class DiffPresentationService {
                         int startLine = action.startLine() - 1;
                         int endLine = action.endLine() - 1;
                         if (startLine < 0 || endLine >= lines.size() || startLine > endLine) continue;
-                        for (int i = endLine; i >= startLine; i--) lines.remove(i);
+
+                        // 先从后往前删除
+                        for (int i = endLine; i >= startLine; i--) {
+                            lines.remove(i);
+                        }
+                        // 再在起始位置插入新行
                         List<String> newLines = Arrays.asList(action.content().split("\\R"));
                         lines.addAll(startLine, newLines);
                         break;
@@ -106,7 +117,9 @@ public final class DiffPresentationService {
                             int startLine = action.startLine() - 1;
                             int endLine = action.endLine() - 1;
                             if (startLine < 0 || endLine >= lines.size() || startLine > endLine) continue;
-                            for (int i = endLine; i >= startLine; i--) lines.remove(i);
+                            for (int i = endLine; i >= startLine; i--) {
+                                lines.remove(i);
+                            }
                         } else {
                             lines.clear();
                         }
@@ -114,9 +127,11 @@ public final class DiffPresentationService {
                     }
                 }
             } catch (Exception e) {
-                // 忽略模拟中的错误
+                // 忽略模拟中的任何错误
             }
         }
+
+        // 将行列表重新组合成一个用 \n 分隔的字符串
         return String.join("\n", lines);
     }
 
