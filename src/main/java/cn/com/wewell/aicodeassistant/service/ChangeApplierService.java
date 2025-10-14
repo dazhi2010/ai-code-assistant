@@ -13,6 +13,7 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.vfs.LocalFileSystem;
 import com.intellij.openapi.vfs.VfsUtil;
 import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.psi.PsiDocumentManager;
 import com.intellij.psi.PsiFile;
 import com.intellij.psi.PsiManager;
 import com.intellij.psi.codeStyle.CodeStyleManager;
@@ -127,6 +128,11 @@ public final class ChangeApplierService {
                 notifyWarning("文件未找到，无法覆盖: " + action.filePath());
                 return;
             }
+            // 中文注释：覆盖前确保 Document 已提交，避免 PSI 未提交导致的各种副作用
+            PsiDocumentManager pdm = PsiDocumentManager.getInstance(project);
+            pdm.doPostponedOperationsAndUnblockDocument(document);
+            pdm.commitDocument(document);
+
             document.replaceString(0, document.getTextLength(), action.content());
             FileDocumentManager.getInstance().saveDocument(document);
             formatFile(FileDocumentManager.getInstance().getFile(document));
@@ -139,28 +145,41 @@ public final class ChangeApplierService {
             Document document = getDocument(action.filePath());
             if (document == null) return;
 
-            int startLine = action.startLine() - 1;
-            int endLine = action.endLine() - 1;
-            if (startLine < 0 || endLine >= document.getLineCount() || startLine > endLine) return;
+            PsiDocumentManager pdm = PsiDocumentManager.getInstance(project);
+            pdm.doPostponedOperationsAndUnblockDocument(document);
+            pdm.commitDocument(document);
 
-            // --- 核心修复：将 UPDATE 拆分为 DELETE + INSERT ---
-            int startOffset = document.getLineStartOffset(startLine);
-            // 注意：删除时要包含最后一行的换行符，所以偏移量要到下一行的行首
-            int endOffset = (endLine + 1 < document.getLineCount()) ? document.getLineStartOffset(endLine + 1) : document.getTextLength();
+            int lineCount = document.getLineCount();
+
+            // 中文注释：对起止行进行“夹取”，避免 AI 提供的行号超出范围导致整个 UPDATE 被跳过（如 application.yml、DEPLOYMENT_REMOTE_NOTES.md）
+            int startLine0 = (action.startLine() != null ? action.startLine() - 1 : 0);
+            int endLine0 = (action.endLine() != null ? action.endLine() - 1 : startLine0);
+
+            if (lineCount == 0) {
+                // 空文件：直接写入目标内容
+                String content = ensureTrailingNewline(action.content());
+                document.insertString(0, content);
+                FileDocumentManager.getInstance().saveDocument(document);
+                formatFile(FileDocumentManager.getInstance().getFile(document));
+                linesChanged[0] = countNewlines(content);
+                return;
+            }
+
+            startLine0 = clamp(startLine0, 0, lineCount - 1);
+            endLine0 = clamp(Math.max(startLine0, endLine0), startLine0, lineCount - 1);
+
+            int startOffset = document.getLineStartOffset(startLine0);
+            int endOffset = (endLine0 + 1 < lineCount) ? document.getLineStartOffset(endLine0 + 1) : document.getTextLength();
 
             document.deleteString(startOffset, endOffset);
 
-            String content = action.content();
-            // 确保插入的内容有换行符，除非它本身就是空的
-            if (!content.isEmpty() && !content.endsWith("\n")) {
-                content += "\n";
-            }
+            String content = ensureTrailingNewline(action.content());
             document.insertString(startOffset, content);
 
             FileDocumentManager.getInstance().saveDocument(document);
             formatFile(FileDocumentManager.getInstance().getFile(document));
 
-            int originalLineCount = endLine - startLine + 1;
+            int originalLineCount = endLine0 - startLine0 + 1;
             int newLineCount = countNewlines(content);
             linesChanged[0] = newLineCount - originalLineCount;
         });
@@ -173,12 +192,19 @@ public final class ChangeApplierService {
             Document document = getDocument(action.filePath());
             if (document == null) return;
 
-            int line = action.line() - 1;
-            if (line < 0 || line > document.getLineCount()) return;
+            PsiDocumentManager pdm = PsiDocumentManager.getInstance(project);
+            pdm.doPostponedOperationsAndUnblockDocument(document);
+            pdm.commitDocument(document);
 
-            int offset = document.getLineStartOffset(line);
-            String contentToInsert = action.content().endsWith("\n") ? action.content() : action.content() + "\n";
+            int lineCount = document.getLineCount();
+            int line0 = (action.line() != null ? action.line() - 1 : lineCount);
+            // 中文注释：允许在最后一行之后插入（追加场景）
+            line0 = clamp(line0, 0, lineCount);
+
+            int offset = (line0 == lineCount) ? document.getTextLength() : document.getLineStartOffset(line0);
+            String contentToInsert = ensureTrailingNewline(action.content());
             document.insertString(offset, contentToInsert);
+
             FileDocumentManager.getInstance().saveDocument(document);
             formatFile(FileDocumentManager.getInstance().getFile(document));
 
@@ -198,16 +224,22 @@ public final class ChangeApplierService {
                     Document document = getDocument(action.filePath());
                     if (document == null) return;
 
-                    int startLine = action.startLine() - 1;
-                    int endLine = action.endLine() - 1;
-                    if (startLine < 0 || endLine >= document.getLineCount() || startLine > endLine) return;
+                    PsiDocumentManager pdm = PsiDocumentManager.getInstance(project);
+                    pdm.doPostponedOperationsAndUnblockDocument(document);
+                    pdm.commitDocument(document);
 
-                    int startOffset = document.getLineStartOffset(startLine);
-                    int endOffset = (endLine + 1 < document.getLineCount()) ? document.getLineStartOffset(endLine + 1) : document.getTextLength();
+                    int lineCount = document.getLineCount();
+                    int start0 = clamp(action.startLine() - 1, 0, Math.max(0, lineCount - 1));
+                    int end0 = clamp(action.endLine() - 1, start0, Math.max(0, lineCount - 1));
+
+                    if (lineCount == 0) return;
+
+                    int startOffset = document.getLineStartOffset(start0);
+                    int endOffset = (end0 + 1 < lineCount) ? document.getLineStartOffset(end0 + 1) : document.getTextLength();
                     document.deleteString(startOffset, endOffset);
                     FileDocumentManager.getInstance().saveDocument(document);
 
-                    linesChanged[0] = -(endLine - startLine + 1);
+                    linesChanged[0] = -(end0 - start0 + 1);
                 } else {
                     file.delete(this);
                 }
@@ -226,27 +258,25 @@ public final class ChangeApplierService {
 
     private int countNewlines(String str) {
         if (str == null || str.isEmpty()) return 0;
-        // 如果字符串不以换行符结尾，那么它的行数是换行符数量+1。如果以换行符结尾，则是换行符数量。
         int count = (int) str.chars().filter(ch -> ch == '\n').count();
         return str.endsWith("\n") ? count : count + 1;
+    }
+
+    private String ensureTrailingNewline(String s) {
+        if (s == null) return "";
+        return s.endsWith("\n") || s.isEmpty() ? s : (s + "\n");
     }
 
     public VirtualFile findVirtualFile(String relativePath) {
         String projectBasePath = project.getBasePath();
         if (projectBasePath == null) return null;
 
-        // 将相对路径转换为绝对路径
         String fullPath = new File(projectBasePath, relativePath.replace('/', File.separatorChar)).getAbsolutePath();
-
-        // 优先使用 refreshAndFindFileByPath，因为它能更好地处理文件系统与VFS的同步问题
         VirtualFile file = LocalFileSystem.getInstance().refreshAndFindFileByPath(fullPath);
-
-        // 如果找不到，作为后备，尝试使用 findFileByIoFile
         if (file == null) {
             File targetFile = new File(fullPath);
             file = LocalFileSystem.getInstance().findFileByIoFile(targetFile);
         }
-
         return file;
     }
 
@@ -260,9 +290,22 @@ public final class ChangeApplierService {
 
     private void formatFile(VirtualFile file) {
         if (file == null) return;
+        // 中文注释：在 PSI 操作前确保 Document 已提交，避免 Markdown/YAML 等文件触发 PSI 非提交异常
+        PsiDocumentManager pdm = PsiDocumentManager.getInstance(project);
+        Document doc = FileDocumentManager.getInstance().getDocument(file);
+        if (doc != null) {
+            pdm.doPostponedOperationsAndUnblockDocument(doc);
+            pdm.commitDocument(doc);
+        } else {
+            pdm.commitAllDocuments();
+        }
+
         PsiFile psiFile = PsiManager.getInstance(project).findFile(file);
         if (psiFile != null) {
             CodeStyleManager.getInstance(project).reformat(psiFile);
+            if (doc != null) {
+                FileDocumentManager.getInstance().saveDocument(doc);
+            }
         }
     }
 
@@ -279,5 +322,10 @@ public final class ChangeApplierService {
     private void notifyError(String message) {
         NotificationGroupManager.getInstance().getNotificationGroup(Constants.NOTIFICATION_GROUP_ID)
                 .createNotification(message, NotificationType.ERROR).notify(project);
+    }
+
+    // 中文注释：通用整数夹取函数，保证值落入 [min, max] 范围
+    private int clamp(int val, int min, int max) {
+        return Math.max(min, Math.min(max, val));
     }
 }
