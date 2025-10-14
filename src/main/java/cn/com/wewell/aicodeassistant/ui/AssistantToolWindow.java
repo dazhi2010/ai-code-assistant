@@ -1,11 +1,13 @@
 package cn.com.wewell.aicodeassistant.ui;
 
 import cn.com.wewell.aicodeassistant.model.AiResponseAction;
+import cn.com.wewell.aicodeassistant.model.FileChanges;
 import cn.com.wewell.aicodeassistant.service.DiffPresentationService;
 import cn.com.wewell.aicodeassistant.service.HistoryManager;
 import cn.com.wewell.aicodeassistant.service.PromptManager;
 import com.intellij.json.JsonFileType;
 import com.intellij.openapi.actionSystem.ActionManager;
+import com.intellij.openapi.actionSystem.ActionPopupMenu;
 import com.intellij.openapi.actionSystem.ActionToolbar;
 import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.application.ApplicationManager;
@@ -69,6 +71,7 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
         themePanel.setBorder(JBUI.Borders.emptyLeft(10));
         themePanel.add(new JLabel("主题: "), BorderLayout.WEST);
         themePanel.add(themeField, BorderLayout.CENTER);
+        themePanel.setPreferredSize(new Dimension(200, themePanel.getPreferredSize().height));
 
         toolbarPanel.add(actionToolbar.getComponent(), BorderLayout.CENTER);
         toolbarPanel.add(themePanel, BorderLayout.EAST);
@@ -82,10 +85,16 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
         JPanel mainPanel = new JPanel(new BorderLayout());
         inputArea = new EditorTextField(EditorFactory.getInstance().createDocument(""), project, FileTypes.PLAIN_TEXT, false, true);
         inputArea.setOneLineMode(false);
+        if (inputArea.getEditor() != null) {
+            inputArea.getEditor().getSettings().setUseSoftWraps(true); // 开启自动换行
+        }
         rightCardLayout = new CardLayout();
         rightPanel = new JPanel(rightCardLayout);
         outputJsonArea = new EditorTextField(EditorFactory.getInstance().createDocument(""), project, JsonFileType.INSTANCE, false, true);
         outputJsonArea.setOneLineMode(false);
+        if (outputJsonArea.getEditor() != null) {
+            outputJsonArea.getEditor().getSettings().setUseSoftWraps(true); // 开启自动换行
+        }
         rightPanel.add(new JBScrollPane(outputJsonArea), JSON_INPUT_CARD);
         changesTree = new Tree(new DefaultMutableTreeNode("变更摘要"));
         changesTree.setCellRenderer(new ChangeTreeCellRenderer());
@@ -131,6 +140,27 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
         });
         // 添加双击事件监听器
         changesTree.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent e) {
+                if (SwingUtilities.isRightMouseButton(e)) {
+                    int row = changesTree.getRowForLocation(e.getX(), e.getY());
+                    if (row != -1) {
+                        changesTree.setSelectionRow(row);
+                        DefaultMutableTreeNode node = (DefaultMutableTreeNode) changesTree.getLastSelectedPathComponent();
+                        if (node != null && node.isRoot()) {
+                            // 只有在根节点上右键才显示菜单
+                            PromptManager promptManager = PromptManager.getInstance(project);
+                            List<AiResponseAction> allActions = promptManager.getParsedActions();
+
+                            DefaultActionGroup group = new DefaultActionGroup();
+                            group.add(new cn.com.wewell.aicodeassistant.action.tree.ApplyAllChangesAction(allActions));
+
+                            ActionPopupMenu popupMenu = ActionManager.getInstance().createActionPopupMenu("AIAssistantTreePopup", group);
+                            popupMenu.getComponent().show(e.getComponent(), e.getX(), e.getY());
+                        }
+                    }
+                }
+            }
             public void mouseClicked(MouseEvent e) {
                 if (e.getClickCount() == 2) {
                     DefaultMutableTreeNode node = (DefaultMutableTreeNode) changesTree.getLastSelectedPathComponent();
@@ -140,11 +170,10 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
                         node = (DefaultMutableTreeNode) node.getParent();
                     }
 
-                    if (node != null && node.getUserObject() instanceof List) {
-                        @SuppressWarnings("unchecked")
-                        List<AiResponseAction> actionsForFile = (List<AiResponseAction>) node.getUserObject();
-                        if (!actionsForFile.isEmpty()) {
-                            DiffPresentationService.getInstance(project).showDiffForFile(actionsForFile);
+                    if (node != null && node.getUserObject() instanceof FileChanges) {
+                        FileChanges fileChanges = (FileChanges) node.getUserObject();
+                        if (!fileChanges.getActions().isEmpty()) {
+                            DiffPresentationService.getInstance(project).showDiffForFile(fileChanges.getActions());
                         }
                     }
                 }
@@ -190,11 +219,10 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
     public void showChangesPreview(Map<String, List<AiResponseAction>> groupedActions) {
         DefaultMutableTreeNode root = new DefaultMutableTreeNode("变更摘要");
         for (Map.Entry<String, List<AiResponseAction>> entry : groupedActions.entrySet()) {
-            // 文件节点现在直接存储其下的所有 actions
-            DefaultMutableTreeNode fileNode = new DefaultMutableTreeNode(entry.getKey());
-            fileNode.setUserObject(entry.getValue()); // 将 List<AiResponseAction> 存入文件节点
+            // 使用 FileChanges 包装类
+            FileChanges fileChanges = new FileChanges(entry.getKey(), entry.getValue());
+            DefaultMutableTreeNode fileNode = new DefaultMutableTreeNode(fileChanges);
 
-            // 为每个 action 创建一个描述性的叶子节点，但它不再持有 action 对象
             for (AiResponseAction action : entry.getValue()) {
                 String actionLabel = String.format("%s: %s", action.action(), getActionDescription(action));
                 DefaultMutableTreeNode actionNode = new DefaultMutableTreeNode(actionLabel);
