@@ -1,5 +1,6 @@
 package cn.com.wewell.aicodeassistant.action;
 
+import cn.com.wewell.aicodeassistant.service.AssistantConfigService;
 import cn.com.wewell.aicodeassistant.service.PromptManager;
 import com.intellij.openapi.actionSystem.ActionUpdateThread;
 import com.intellij.openapi.actionSystem.AnAction;
@@ -11,6 +12,7 @@ import com.intellij.openapi.project.Project;
 import com.intellij.openapi.vfs.VfsUtil;
 import com.intellij.openapi.vfs.VfsUtilCore;
 import com.intellij.openapi.vfs.VirtualFile;
+import com.intellij.openapi.vfs.VirtualFileFilter;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.IOException;
@@ -18,7 +20,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * @author yuqf
+ * 中文注释：
+ * 1) 依据 .ai-assistant/config.json 的 ignore 规则过滤文件/目录（支持名称、目录、* 号等通配）。
+ * 2) 将选中文件内容追加到工作区后，如末尾没有“## 我的需求”段，则自动追加该段。
  */
 public class AddFilesToAssistantAction extends AnAction {
 
@@ -41,16 +45,22 @@ public class AddFilesToAssistantAction extends AnAction {
 
         // 异步执行文件遍历和读取
         ApplicationManager.getApplication().executeOnPooledThread(() -> {
+            AssistantConfigService configService = AssistantConfigService.getInstance(project);
+            // 中文注释：确保默认配置文件存在
+            configService.ensureDefaultConfig();
+
             for (VirtualFile fileOrDir : selectedFiles) {
                 if (fileOrDir.isDirectory()) {
-                    VfsUtilCore.iterateChildrenRecursively(fileOrDir, null, file -> {
-                        if (!file.isDirectory() && isProcessable(file)) {
-                            filesToAdd.add(file);
+                    // 中文注释：通过过滤器避免深入被忽略的目录
+                    VirtualFileFilter dirFilter = vf -> !vf.isDirectory() || !configService.isIgnored(vf);
+                    VfsUtilCore.iterateChildrenRecursively(fileOrDir, dirFilter, vf -> {
+                        if (!vf.isDirectory() && isProcessable(vf) && !configService.isIgnored(vf)) {
+                            filesToAdd.add(vf);
                         }
                         return true;
                     });
                 } else {
-                    if (isProcessable(fileOrDir)) {
+                    if (isProcessable(fileOrDir) && !configService.isIgnored(fileOrDir)) {
                         filesToAdd.add(fileOrDir);
                     }
                 }
@@ -67,13 +77,25 @@ public class AddFilesToAssistantAction extends AnAction {
                         sb.append("## 文件路径: ").append(relativePath).append("\n");
                         sb.append("```").append(getFileTypeMarkdown(file)).append("\n");
                         sb.append(content);
-                        sb.append("\n```\n\n");
+                        sb.append("\n```").append("\n\n");
 
                     } catch (IOException ex) {
-                        // Ignore files that cannot be read
+                        // 中文注释：忽略无法读取的文件
                     }
                 }
-                promptManager.addText(sb.toString());
+
+                // 中文注释：在追加代码后，如末尾没有“## 我的需求”，则补齐该段
+                String current = promptManager.getInputContent();
+                if (!current.contains("## 我的需求")) {
+                    if (!sb.toString().endsWith("\n\n") && sb.length() > 0) {
+                        sb.append('\n');
+                    }
+                    sb.append("## 我的需求\n[请在这里补充您的需求描述...]");
+                }
+
+                if (sb.length() > 0) {
+                    promptManager.addText(sb.toString());
+                }
             });
         });
     }
@@ -97,7 +119,7 @@ public class AddFilesToAssistantAction extends AnAction {
     private String getFileTypeMarkdown(VirtualFile file) {
         FileType fileType = file.getFileType();
         String name = fileType.getName().toLowerCase();
-        // 简单的映射，可以根据需要扩展
+        // 中文注释：简单的映射，可以根据需要扩展
         if (name.contains("java")) return "java";
         if (name.contains("javascript")) return "javascript";
         if (name.contains("typescript")) return "typescript";

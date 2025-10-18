@@ -14,6 +14,7 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.editor.EditorFactory;
 import com.intellij.openapi.editor.event.DocumentEvent;
 import com.intellij.openapi.editor.event.DocumentListener;
+import com.intellij.openapi.editor.ex.EditorEx;
 import com.intellij.openapi.fileTypes.FileTypes;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.SimpleToolWindowPanel;
@@ -85,21 +86,45 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
         JPanel mainPanel = new JPanel(new BorderLayout());
         inputArea = new EditorTextField(EditorFactory.getInstance().createDocument(""), project, FileTypes.PLAIN_TEXT, false, true);
         inputArea.setOneLineMode(false);
+        // 中文注释：通过 SettingsProvider 关闭横向滚动条并开启自动换行（确保在编辑器创建后生效）
+        inputArea.addSettingsProvider((EditorEx editor) -> {
+            editor.getSettings().setUseSoftWraps(true);
+            editor.getSettings().setWrapWhenTypingReachesRightMargin(true);
+            editor.setHorizontalScrollbarVisible(false);
+        });
         if (inputArea.getEditor() != null) {
-            inputArea.getEditor().getSettings().setUseSoftWraps(true); // 开启自动换行
+            inputArea.getEditor().getSettings().setUseSoftWraps(true); // 兜底：有时构造阶段已创建编辑器
         }
+
         rightCardLayout = new CardLayout();
         rightPanel = new JPanel(rightCardLayout);
+
         outputJsonArea = new EditorTextField(EditorFactory.getInstance().createDocument(""), project, JsonFileType.INSTANCE, false, true);
         outputJsonArea.setOneLineMode(false);
+        // 中文注释：同样优化 JSON 输出区的编辑器滚动条与自动换行
+        outputJsonArea.addSettingsProvider((EditorEx editor) -> {
+            editor.getSettings().setUseSoftWraps(true);
+            editor.getSettings().setWrapWhenTypingReachesRightMargin(true);
+            editor.setHorizontalScrollbarVisible(false);
+        });
         if (outputJsonArea.getEditor() != null) {
-            outputJsonArea.getEditor().getSettings().setUseSoftWraps(true); // 开启自动换行
+            outputJsonArea.getEditor().getSettings().setUseSoftWraps(true);
         }
-        rightPanel.add(new JBScrollPane(outputJsonArea), JSON_INPUT_CARD);
+
+        // 中文注释：右侧 JSON 输入卡片使用 JBScrollPane，但强制关闭横向滚动条
+        JBScrollPane jsonScroll = new JBScrollPane(outputJsonArea);
+        jsonScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        rightPanel.add(jsonScroll, JSON_INPUT_CARD);
+
         changesTree = new Tree(new DefaultMutableTreeNode("变更摘要"));
         changesTree.setCellRenderer(new ChangeTreeCellRenderer());
         rightPanel.add(new JBScrollPane(changesTree), CHANGES_PREVIEW_CARD);
-        JSplitPane splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, new JBScrollPane(inputArea), rightPanel);
+
+        // 中文注释：左侧输入区同样关闭横向滚动条
+        JBScrollPane inputScroll = new JBScrollPane(inputArea);
+        inputScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+
+        JSplitPane splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, inputScroll, rightPanel);
         splitPane.setResizeWeight(0.5);
         mainPanel.add(splitPane, BorderLayout.CENTER);
         tabbedPane.addTab("工作区", mainPanel);
@@ -161,6 +186,7 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
                     }
                 }
             }
+
             public void mouseClicked(MouseEvent e) {
                 if (e.getClickCount() == 2) {
                     DefaultMutableTreeNode node = (DefaultMutableTreeNode) changesTree.getLastSelectedPathComponent();

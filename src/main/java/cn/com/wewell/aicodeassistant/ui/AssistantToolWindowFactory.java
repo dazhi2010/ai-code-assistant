@@ -1,5 +1,6 @@
 package cn.com.wewell.aicodeassistant.ui;
 
+import cn.com.wewell.aicodeassistant.service.AssistantConfigService;
 import cn.com.wewell.aicodeassistant.service.PromptManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.wm.ToolWindow;
@@ -11,6 +12,9 @@ import org.jetbrains.annotations.NotNull;
 public class AssistantToolWindowFactory implements ToolWindowFactory {
     @Override
     public void createToolWindowContent(@NotNull Project project, @NotNull ToolWindow toolWindow) {
+        // 中文注释：确保默认配置文件存在（首次启动时生成）
+        AssistantConfigService.getInstance(project).ensureDefaultConfig();
+
         AssistantToolWindow assistantToolWindow = new AssistantToolWindow(project);
         ContentFactory contentFactory = ContentFactory.getInstance();
         Content content = contentFactory.createContent(assistantToolWindow, "", false);

@@ -18,12 +18,12 @@
         <projectService serviceImplementation="cn.com.wewell.aicodeassistant.service.ChangeApplierService"/>
         <projectService serviceImplementation="cn.com.wewell.aicodeassistant.service.DiffPresentationService"/>
         <projectService serviceImplementation="cn.com.wewell.aicodeassistant.service.HistoryManager"/>
+        <projectService serviceImplementation="cn.com.wewell.aicodeassistant.service.AssistantConfigService"/>
         <!-- 工具窗口 -->
         <toolWindow id="Yuqf AI Assistant"
                     anchor="right"
                     factoryClass="cn.com.wewell.aicodeassistant.ui.AssistantToolWindowFactory"
                     icon="/pluginIcon.svg"/>
-
 
         <!-- 通知组 -->
         <notificationGroup id="Yuqf AI Assistant Notifications"
@@ -67,6 +67,10 @@
             <action id="AIAssistant.ClearAll"
                     class="cn.com.wewell.aicodeassistant.action.toolwindow.ClearAllAction"
                     text="清空" description="清空所有内容" icon="AllIcons.Actions.GC"/>
+            <action id="AIAssistant.RefreshConfig"
+                    class="cn.com.wewell.aicodeassistant.action.toolwindow.RefreshAssistantConfigAction"
+                    text="刷新配置" description="重新加载 .ai-assistant/config.json 配置"
+                    icon="AllIcons.Actions.Refresh"/>
         </group>
     </actions>
 </idea-plugin>
