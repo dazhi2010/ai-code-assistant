@@ -250,8 +250,8 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
             DefaultMutableTreeNode fileNode = new DefaultMutableTreeNode(fileChanges);
 
             for (AiResponseAction action : entry.getValue()) {
-                String actionLabel = String.format("%s: %s", action.action(), getActionDescription(action));
-                DefaultMutableTreeNode actionNode = new DefaultMutableTreeNode(actionLabel);
+                // 直接将 action 对象作为 userObject
+                DefaultMutableTreeNode actionNode = new DefaultMutableTreeNode(action);
                 fileNode.add(actionNode);
             }
             root.add(fileNode);
@@ -268,16 +268,7 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
         rightCardLayout.show(rightPanel, JSON_INPUT_CARD);
     }
 
-    private String getActionDescription(AiResponseAction action) {
-        return switch (action.action().toUpperCase()) {
-            case "CREATE" -> "创建文件";
-            case "OVERWRITE" -> "覆盖文件";
-            case "UPDATE" -> String.format("行 %d-%d", action.startLine(), action.endLine());
-            case "INSERT" -> String.format("行 %d", action.line());
-            case "DELETE" -> (action.startLine() != null) ? String.format("行 %d-%d", action.startLine(), action.endLine()) : "删除文件";
-            default -> "未知操作";
-        };
-    }
+
 
     public String getTheme() {
         return themeField.getText();

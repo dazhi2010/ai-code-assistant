@@ -17,9 +17,9 @@ import com.intellij.openapi.util.Computable;
 import com.intellij.openapi.vfs.VirtualFile;
 
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
 
 @Service(Service.Level.PROJECT)
 public final class DiffPresentationService {
@@ -51,10 +51,10 @@ public final class DiffPresentationService {
         DiffData diffData = ApplicationManager.getApplication().runReadAction(readComputable);
         VirtualFile file = diffData.file;
 
-        // 2. 创建左侧内容
+        // 2. 创建左侧内容 (原始文件)
         DiffContent content1 = DiffContentFactory.getInstance().create(project, diffData.originalContent, file != null ? file.getFileType() : null);
 
-        // 3. 通过纯字符串操作创建右侧预览内容
+        // 3. 通过字符串操作创建右侧预览内容
         String previewContent = createPreviewContentByStringManipulation(diffData.originalContent, actionsForFile);
         DiffContent content2 = DiffContentFactory.getInstance().create(project, previewContent, file != null ? file.getFileType() : null);
 
@@ -67,97 +67,70 @@ public final class DiffPresentationService {
         actions.add(new ApplyChangeAction(actionsForFile));
         request.putUserData(DiffUserDataKeys.CONTEXT_ACTIONS, actions);
 
-        // 6. 直接调用 showDiff
+        // 6. 显示 Diff 窗口
         DiffManager.getInstance().showDiff(project, request);
     }
 
-    /**
-     * 修复点：
-     * 1) 之前按行拆分使用 split("\\R", -1) 会在文件末尾有换行时引入“虚拟空行”，导致 UPDATE 的 endLine 越界而被忽略；
-     * 2) 对传入的行号进行“夹取”(clamp) 与空文件保护，允许 AI 给出的行号略微超出边界（如指向文件最后一行之后），
-     *    从而在如 DEPLOYMENT_REMOTE_NOTES.md 这类文件上也能得到正确的右侧预览内容。
-     */
     private String createPreviewContentByStringManipulation(String originalContent, List<AiResponseAction> actions) {
-        // 优先处理 OVERWRITE 和 CREATE
+        // 优先处理 OVERWRITE 和 CREATE，它们决定了全部内容
         AiResponseAction overwriteAction = actions.stream().filter(a -> "OVERWRITE".equalsIgnoreCase(a.action())).findFirst().orElse(null);
         if (overwriteAction != null) return overwriteAction.content();
 
         AiResponseAction createAction = actions.stream().filter(a -> "CREATE".equalsIgnoreCase(a.action())).findFirst().orElse(null);
         if (createAction != null) return createAction.content();
 
-        // 使用不保留末尾空行的拆分，避免行数+1 的“虚拟行”问题
-        List<String> lines = splitToLines(originalContent);
+        StringBuilder previewBuilder = new StringBuilder(originalContent);
 
-        // 按行号倒序排序操作，这样在修改时不会影响前面操作的行索引
-        actions.sort(Comparator.comparingInt((AiResponseAction a) -> ChangeApplierService.getInstance(project).getActionStartLine(a)).reversed());
-
+        // 按顺序应用变更来生成预览
         for (AiResponseAction action : actions) {
-            try {
+            String oldBlock = action.oldCodeBlock();
+            String newBlock = action.newCodeBlock();
+
+            // 对于需要锚点代码块的操作，如果锚点为空则跳过
+            if (oldBlock == null || oldBlock.isEmpty()) {
+                continue;
+            }
+
+            // 在当前预览内容中查找唯一的代码块
+            findUniqueBlockOffsets(previewBuilder.toString(), oldBlock).ifPresent(range -> {
                 switch (action.action().toUpperCase()) {
-                    case "UPDATE": {
-                        int start0 = action.startLine() != null ? action.startLine() - 1 : 0;
-                        int end0 = action.endLine() != null ? action.endLine() - 1 : start0;
-
-                        if (lines.isEmpty()) {
-                            // 空文件场景：直接把内容视为整文件替换
-                            lines.addAll(splitToLines(action.content()));
-                            break;
-                        }
-
-                        // 对行号进行夹取，确保在有效范围内
-                        start0 = clamp(start0, 0, lines.size() - 1);
-                        end0 = clamp(end0, start0, lines.size() - 1);
-
-                        for (int i = end0; i >= start0; i--) {
-                            lines.remove(i);
-                        }
-                        lines.addAll(start0, splitToLines(action.content()));
+                    case "UPDATE":
+                        previewBuilder.replace(range.startOffset(), range.endOffset(), Objects.requireNonNullElse(newBlock, ""));
                         break;
-                    }
-                    case "INSERT": {
-                        int line0 = action.line() != null ? action.line() - 1 : lines.size();
-                        // 允许在最后一行之后插入（line == size）
-                        line0 = clamp(line0, 0, lines.size());
-                        lines.addAll(line0, splitToLines(action.content()));
+                    case "INSERT_AFTER":
+                        previewBuilder.insert(range.endOffset(), Objects.requireNonNullElse(newBlock, ""));
                         break;
-                    }
-                    case "DELETE": {
-                        if (action.startLine() != null && action.endLine() != null) {
-                            if (lines.isEmpty()) break;
-                            int start0 = clamp(action.startLine() - 1, 0, lines.size() - 1);
-                            int end0 = clamp(action.endLine() - 1, start0, lines.size() - 1);
-                            for (int i = end0; i >= start0; i--) {
-                                lines.remove(i);
-                            }
-                        } else {
-                            // 删除整个文件
-                            lines.clear();
-                        }
+                    case "DELETE":
+                        previewBuilder.delete(range.startOffset(), range.endOffset());
                         break;
-                    }
                     default:
-                        // 其他操作类型（如未知类型）忽略
+                        // 其他操作类型在预览中忽略
                         break;
                 }
-            } catch (Exception e) {
-                // 预览阶段忽略异常，避免影响 UI 体验
-            }
+            });
         }
 
-        // 将行列表重新组合成一个用 \n 分隔的字符串
-        return String.join("\n", lines);
+        return previewBuilder.toString();
     }
 
-    // 将文本拆分为行，不保留末尾空行，避免越界问题
-    private List<String> splitToLines(String text) {
-        if (text == null || text.isEmpty()) return new ArrayList<>();
-        return new ArrayList<>(Arrays.asList(text.split("\\R")));
-    }
+    /**
+     * 在给定内容中查找唯一的代码块，并返回其起始和结束偏移量。
+     * 如果找不到或找到多个，则返回 Optional.empty()。
+     */
+    private Optional<BlockRange> findUniqueBlockOffsets(String content, String blockToFind) {
+        int startIndex = content.indexOf(blockToFind);
+        if (startIndex == -1) {
+            return Optional.empty(); // 找不到
+        }
 
-    // 将值限制在 [min, max] 区间内
-    private int clamp(int val, int min, int max) {
-        return Math.max(min, Math.min(max, val));
+        int lastIndex = content.lastIndexOf(blockToFind);
+        if (startIndex != lastIndex) {
+            return Optional.empty(); // 存在歧义
+        }
+
+        return Optional.of(new BlockRange(startIndex, startIndex + blockToFind.length()));
     }
 
     private record DiffData(VirtualFile file, String originalContent) {}
+    private record BlockRange(int startOffset, int endOffset) {}
 }

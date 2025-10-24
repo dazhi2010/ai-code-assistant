@@ -20,9 +20,9 @@ import com.intellij.psi.codeStyle.CodeStyleManager;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
@@ -45,9 +45,9 @@ public final class ChangeApplierService {
 
         CommandProcessor.getInstance().executeCommand(project, () -> {
             for (Map.Entry<String, List<AiResponseAction>> entry : groupedActions.entrySet()) {
-                String filePath = entry.getKey();
                 List<AiResponseAction> fileActions = entry.getValue();
 
+                // 优先处理 OVERWRITE，因为它会覆盖所有其他变更
                 Optional<AiResponseAction> overwriteAction = fileActions.stream()
                         .filter(a -> "OVERWRITE".equalsIgnoreCase(a.action()))
                         .findFirst();
@@ -57,49 +57,34 @@ public final class ChangeApplierService {
                     continue;
                 }
 
-                fileActions.sort(Comparator.comparingInt(this::getActionStartLine));
-
-                int lineOffset = 0;
-
+                // 对于同一个文件的多个操作，按顺序执行
+                // 注意：如果操作之间存在重叠，AI响应的顺序至关重要。
+                // 理论上，更安全的做法是每次修改后都重新加载内容，但会牺牲性能。
+                // 当前假设AI提供的操作是按逻辑顺序排列的。
                 for (AiResponseAction action : fileActions) {
-                    int linesChanged = applyActionWithOffset(action, lineOffset);
-                    lineOffset += linesChanged;
+                    applyActionByContent(action);
                 }
             }
             notifySuccess("已成功应用 " + actions.size() + " 个变更。");
         }, "Apply AI Assistant Changes", null);
     }
 
-    public int applyActionWithOffset(AiResponseAction originalAction, int lineOffset) {
-        AiResponseAction adjustedAction = new AiResponseAction(
-                originalAction.action(),
-                originalAction.filePath(),
-                originalAction.startLine() != null ? originalAction.startLine() + lineOffset : null,
-                originalAction.endLine() != null ? originalAction.endLine() + lineOffset : null,
-                originalAction.line() != null ? originalAction.line() + lineOffset : null,
-                originalAction.content(),
-                originalAction.searchText(),
-                originalAction.replaceText()
-        );
-
+    private void applyActionByContent(AiResponseAction action) {
         try {
-            return switch (adjustedAction.action().toUpperCase()) {
-                case "CREATE" -> applyCreate(adjustedAction);
-                case "UPDATE" -> applyUpdate(adjustedAction);
-                case "INSERT" -> applyInsert(adjustedAction);
-                case "DELETE" -> applyDelete(adjustedAction);
-                default -> {
-                    notifyWarning("未知的操作类型: " + adjustedAction.action());
-                    yield 0;
-                }
-            };
+            switch (action.action().toUpperCase()) {
+                case "CREATE" -> applyCreate(action);
+                case "OVERWRITE" -> applyOverwrite(action); // 已经预先处理，但保留以防万一
+                case "UPDATE" -> applyUpdateByContent(action);
+                case "INSERT_AFTER" -> applyInsertAfterByContent(action);
+                case "DELETE" -> applyDeleteByContent(action);
+                default -> notifyWarning("未知的操作类型: " + action.action());
+            }
         } catch (IOException e) {
-            notifyError("应用变更失败: " + e.getMessage());
-            return 0;
+            notifyError("应用变更失败 '" + action.action() + "' on " + action.filePath() + ": " + e.getMessage());
         }
     }
 
-    private int applyCreate(AiResponseAction action) throws IOException {
+    private void applyCreate(AiResponseAction action) throws IOException {
         WriteCommandAction.runWriteCommandAction(project, () -> {
             String projectBasePath = project.getBasePath();
             if (projectBasePath == null) return;
@@ -118,153 +103,113 @@ public final class ChangeApplierService {
                 throw new RuntimeException(e);
             }
         });
-        return 0;
     }
 
     private void applyOverwrite(AiResponseAction action) {
         WriteCommandAction.runWriteCommandAction(project, () -> {
             Document document = getDocument(action.filePath());
             if (document == null) {
-                notifyWarning("文件未找到，无法覆盖: " + action.filePath());
+                // 如果文件不存在，则尝试创建它
+                try {
+                    applyCreate(action);
+                } catch (IOException e) {
+                    notifyError("文件不存在，创建失败: " + action.filePath());
+                }
                 return;
             }
-            // 中文注释：覆盖前确保 Document 已提交，避免 PSI 未提交导致的各种副作用
-            PsiDocumentManager pdm = PsiDocumentManager.getInstance(project);
-            pdm.doPostponedOperationsAndUnblockDocument(document);
-            pdm.commitDocument(document);
-
             document.replaceString(0, document.getTextLength(), action.content());
             FileDocumentManager.getInstance().saveDocument(document);
             formatFile(FileDocumentManager.getInstance().getFile(document));
         });
     }
 
-    private int applyUpdate(AiResponseAction action) {
-        final int[] linesChanged = {0};
+    private void applyUpdateByContent(AiResponseAction action) {
         WriteCommandAction.runWriteCommandAction(project, () -> {
-            Document document = getDocument(action.filePath());
+            Document document = getDocumentForModification(action.filePath());
             if (document == null) return;
 
-            PsiDocumentManager pdm = PsiDocumentManager.getInstance(project);
-            pdm.doPostponedOperationsAndUnblockDocument(document);
-            pdm.commitDocument(document);
-
-            int lineCount = document.getLineCount();
-
-            // 中文注释：对起止行进行“夹取”，避免 AI 提供的行号超出范围导致整个 UPDATE 被跳过（如 application.yml、DEPLOYMENT_REMOTE_NOTES.md）
-            int startLine0 = (action.startLine() != null ? action.startLine() - 1 : 0);
-            int endLine0 = (action.endLine() != null ? action.endLine() - 1 : startLine0);
-
-            if (lineCount == 0) {
-                // 空文件：直接写入目标内容
-                String content = ensureTrailingNewline(action.content());
-                document.insertString(0, content);
+            findUniqueBlock(document.getText(), action.oldCodeBlock(), action.filePath()).ifPresent(range -> {
+                document.replaceString(range.startOffset(), range.endOffset(), Objects.requireNonNullElse(action.newCodeBlock(), ""));
                 FileDocumentManager.getInstance().saveDocument(document);
-                formatFile(FileDocumentManager.getInstance().getFile(document));
-                linesChanged[0] = countNewlines(content);
-                return;
-            }
-
-            startLine0 = clamp(startLine0, 0, lineCount - 1);
-            endLine0 = clamp(Math.max(startLine0, endLine0), startLine0, lineCount - 1);
-
-            int startOffset = document.getLineStartOffset(startLine0);
-            int endOffset = (endLine0 + 1 < lineCount) ? document.getLineStartOffset(endLine0 + 1) : document.getTextLength();
-
-            document.deleteString(startOffset, endOffset);
-
-            String content = ensureTrailingNewline(action.content());
-            document.insertString(startOffset, content);
-
-            FileDocumentManager.getInstance().saveDocument(document);
-            formatFile(FileDocumentManager.getInstance().getFile(document));
-
-            int originalLineCount = endLine0 - startLine0 + 1;
-            int newLineCount = countNewlines(content);
-            linesChanged[0] = newLineCount - originalLineCount;
+            });
         });
-        return linesChanged[0];
     }
 
-    private int applyInsert(AiResponseAction action) {
-        final int[] linesChanged = {0};
+    private void applyInsertAfterByContent(AiResponseAction action) {
         WriteCommandAction.runWriteCommandAction(project, () -> {
-            Document document = getDocument(action.filePath());
+            Document document = getDocumentForModification(action.filePath());
             if (document == null) return;
 
-            PsiDocumentManager pdm = PsiDocumentManager.getInstance(project);
-            pdm.doPostponedOperationsAndUnblockDocument(document);
-            pdm.commitDocument(document);
-
-            int lineCount = document.getLineCount();
-            int line0 = (action.line() != null ? action.line() - 1 : lineCount);
-            // 中文注释：允许在最后一行之后插入（追加场景）
-            line0 = clamp(line0, 0, lineCount);
-
-            int offset = (line0 == lineCount) ? document.getTextLength() : document.getLineStartOffset(line0);
-            String contentToInsert = ensureTrailingNewline(action.content());
-            document.insertString(offset, contentToInsert);
-
-            FileDocumentManager.getInstance().saveDocument(document);
-            formatFile(FileDocumentManager.getInstance().getFile(document));
-
-            linesChanged[0] = countNewlines(contentToInsert);
+            findUniqueBlock(document.getText(), action.oldCodeBlock(), action.filePath()).ifPresent(range -> {
+                document.insertString(range.endOffset(), Objects.requireNonNullElse(action.newCodeBlock(), ""));
+                FileDocumentManager.getInstance().saveDocument(document);
+            });
         });
-        return linesChanged[0];
     }
 
-    private int applyDelete(AiResponseAction action) throws IOException {
-        final int[] linesChanged = {0};
-        WriteCommandAction.runWriteCommandAction(project, () -> {
-            VirtualFile file = findVirtualFile(action.filePath());
-            if (file == null) return;
-
-            try {
-                if (action.startLine() != null && action.endLine() != null) {
-                    Document document = getDocument(action.filePath());
-                    if (document == null) return;
-
-                    PsiDocumentManager pdm = PsiDocumentManager.getInstance(project);
-                    pdm.doPostponedOperationsAndUnblockDocument(document);
-                    pdm.commitDocument(document);
-
-                    int lineCount = document.getLineCount();
-                    int start0 = clamp(action.startLine() - 1, 0, Math.max(0, lineCount - 1));
-                    int end0 = clamp(action.endLine() - 1, start0, Math.max(0, lineCount - 1));
-
-                    if (lineCount == 0) return;
-
-                    int startOffset = document.getLineStartOffset(start0);
-                    int endOffset = (end0 + 1 < lineCount) ? document.getLineStartOffset(end0 + 1) : document.getTextLength();
-                    document.deleteString(startOffset, endOffset);
-                    FileDocumentManager.getInstance().saveDocument(document);
-
-                    linesChanged[0] = -(end0 - start0 + 1);
+    private void applyDeleteByContent(AiResponseAction action) throws IOException {
+        // 如果 oldCodeBlock 为空，则认为是删除整个文件
+        if (action.oldCodeBlock() == null || action.oldCodeBlock().isEmpty()) {
+            WriteCommandAction.runWriteCommandAction(project, () -> {
+                VirtualFile file = findVirtualFile(action.filePath());
+                if (file != null && file.exists()) {
+                    try {
+                        file.delete(this);
+                        notifySuccess("文件已删除: " + action.filePath());
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
                 } else {
-                    file.delete(this);
+                    notifyWarning("尝试删除但文件未找到: " + action.filePath());
                 }
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
+            });
+            return;
+        }
+
+        // 否则，删除文件中的代码块
+        WriteCommandAction.runWriteCommandAction(project, () -> {
+            Document document = getDocumentForModification(action.filePath());
+            if (document == null) return;
+
+            findUniqueBlock(document.getText(), action.oldCodeBlock(), action.filePath()).ifPresent(range -> {
+                document.deleteString(range.startOffset(), range.endOffset());
+                FileDocumentManager.getInstance().saveDocument(document);
+            });
         });
-        return linesChanged[0];
     }
 
-    public int getActionStartLine(AiResponseAction action) {
-        if (action.startLine() != null) return action.startLine();
-        if (action.line() != null) return action.line();
-        return 0;
+    private Optional<BlockRange> findUniqueBlock(String content, String blockToFind, String filePath) {
+        if (blockToFind == null || blockToFind.isEmpty()) {
+            notifyWarning("操作被跳过：代码块为空 on " + filePath);
+            return Optional.empty();
+        }
+
+        int startIndex = content.indexOf(blockToFind);
+        if (startIndex == -1) {
+            notifyError("应用变更失败：在 " + filePath + " 中找不到指定的代码块。");
+            return Optional.empty();
+        }
+
+        int lastIndex = content.lastIndexOf(blockToFind);
+        if (startIndex != lastIndex) {
+            notifyError("应用变更失败：在 " + filePath + " 中找到多个相同的代码块，存在歧义。");
+            return Optional.empty();
+        }
+
+        return Optional.of(new BlockRange(startIndex, startIndex + blockToFind.length()));
     }
 
-    private int countNewlines(String str) {
-        if (str == null || str.isEmpty()) return 0;
-        int count = (int) str.chars().filter(ch -> ch == '\n').count();
-        return str.endsWith("\n") ? count : count + 1;
-    }
-
-    private String ensureTrailingNewline(String s) {
-        if (s == null) return "";
-        return s.endsWith("\n") || s.isEmpty() ? s : (s + "\n");
+    private Document getDocumentForModification(String relativePath) {
+        Document document = getDocument(relativePath);
+        if (document == null) {
+            notifyWarning("文件未找到，无法应用变更: " + relativePath);
+            return null;
+        }
+        // 确保 Document 和 PSI 状态同步
+        PsiDocumentManager pdm = PsiDocumentManager.getInstance(project);
+        pdm.doPostponedOperationsAndUnblockDocument(document);
+        pdm.commitDocument(document);
+        return document;
     }
 
     public VirtualFile findVirtualFile(String relativePath) {
@@ -272,12 +217,7 @@ public final class ChangeApplierService {
         if (projectBasePath == null) return null;
 
         String fullPath = new File(projectBasePath, relativePath.replace('/', File.separatorChar)).getAbsolutePath();
-        VirtualFile file = LocalFileSystem.getInstance().refreshAndFindFileByPath(fullPath);
-        if (file == null) {
-            File targetFile = new File(fullPath);
-            file = LocalFileSystem.getInstance().findFileByIoFile(targetFile);
-        }
-        return file;
+        return LocalFileSystem.getInstance().refreshAndFindFileByPath(fullPath);
     }
 
     private Document getDocument(String relativePath) {
@@ -290,22 +230,15 @@ public final class ChangeApplierService {
 
     private void formatFile(VirtualFile file) {
         if (file == null) return;
-        // 中文注释：在 PSI 操作前确保 Document 已提交，避免 Markdown/YAML 等文件触发 PSI 非提交异常
-        PsiDocumentManager pdm = PsiDocumentManager.getInstance(project);
-        Document doc = FileDocumentManager.getInstance().getDocument(file);
-        if (doc != null) {
-            pdm.doPostponedOperationsAndUnblockDocument(doc);
-            pdm.commitDocument(doc);
-        } else {
-            pdm.commitAllDocuments();
-        }
-
         PsiFile psiFile = PsiManager.getInstance(project).findFile(file);
         if (psiFile != null) {
-            CodeStyleManager.getInstance(project).reformat(psiFile);
-            if (doc != null) {
-                FileDocumentManager.getInstance().saveDocument(doc);
-            }
+            WriteCommandAction.runWriteCommandAction(project, () -> {
+                CodeStyleManager.getInstance(project).reformat(psiFile);
+                Document doc = FileDocumentManager.getInstance().getDocument(file);
+                if (doc != null) {
+                    FileDocumentManager.getInstance().saveDocument(doc);
+                }
+            });
         }
     }
 
@@ -324,8 +257,5 @@ public final class ChangeApplierService {
                 .createNotification(message, NotificationType.ERROR).notify(project);
     }
 
-    // 中文注释：通用整数夹取函数，保证值落入 [min, max] 范围
-    private int clamp(int val, int min, int max) {
-        return Math.max(min, Math.min(max, val));
-    }
+    private record BlockRange(int startOffset, int endOffset) {}
 }

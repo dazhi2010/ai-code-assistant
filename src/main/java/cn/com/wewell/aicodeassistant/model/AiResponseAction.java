@@ -8,6 +8,6 @@ public record AiResponseAction(
         Integer endLine,
         Integer line,
         String content,
-        String searchText,
-        String replaceText
+        String oldCodeBlock,
+        String newCodeBlock
 ) {}
