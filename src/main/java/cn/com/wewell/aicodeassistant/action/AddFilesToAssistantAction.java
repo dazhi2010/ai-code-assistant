@@ -68,33 +68,9 @@ public class AddFilesToAssistantAction extends AnAction {
 
             // 在UI线程中构建字符串并更新UI
             ApplicationManager.getApplication().invokeLater(() -> {
-                StringBuilder sb = new StringBuilder();
-                for (VirtualFile file : filesToAdd) {
-                    try {
-                        String relativePath = VfsUtil.getRelativePath(file, project.getBaseDir(), '/');
-                        String content = VfsUtilCore.loadText(file);
-
-                        sb.append("## 文件路径: ").append(relativePath).append("\n");
-                        sb.append("```").append(getFileTypeMarkdown(file)).append("\n");
-                        sb.append(content);
-                        sb.append("\n```").append("\n\n");
-
-                    } catch (IOException ex) {
-                        // 中文注释：忽略无法读取的文件
-                    }
-                }
-
-                // 中文注释：在追加代码后，如末尾没有“## 我的需求”，则补齐该段
-                String current = promptManager.getInputContent();
-                if (!current.contains("## 我的需求")) {
-                    if (!sb.toString().endsWith("\n\n") && sb.length() > 0) {
-                        sb.append('\n');
-                    }
-                    sb.append("## 我的需求\n[请在这里补充您的需求描述...]");
-                }
-
-                if (sb.length() > 0) {
-                    promptManager.addText(sb.toString());
+                if (!filesToAdd.isEmpty()) {
+                    // 追加到现有内容末尾，并确保“## 我的需求”存在
+                    cn.com.wewell.aicodeassistant.util.PromptContentUtil.addFilesToPrompt(project, filesToAdd, false, true);
                 }
             });
         });

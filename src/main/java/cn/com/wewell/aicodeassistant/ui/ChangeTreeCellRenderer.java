@@ -1,10 +1,10 @@
 package cn.com.wewell.aicodeassistant.ui;
 
 import cn.com.wewell.aicodeassistant.model.AiResponseAction;
+import cn.com.wewell.aicodeassistant.model.RequiredArtifact;
 import com.intellij.icons.AllIcons;
 import com.intellij.ui.ColoredTreeCellRenderer;
 import com.intellij.ui.SimpleTextAttributes;
-import org.apache.commons.text.StringEscapeUtils;
 import org.jetbrains.annotations.NotNull;
 
 import javax.swing.*;
@@ -47,10 +47,20 @@ public class ChangeTreeCellRenderer extends ColoredTreeCellRenderer {
                 String newCode = action.newCodeBlock() != null ? action.newCodeBlock() : action.content();
                 if (newCode != null && !newCode.isEmpty()) {
                     // 使用 HTML 和 <pre> 标签来保持格式，并转义HTML特殊字符
-                    String escapedCode = StringEscapeUtils.escapeHtml4(newCode);
+                    String escapedCode = newCode.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
                     setToolTipText("<html><pre>" + escapedCode + "</pre></html>");
                 }
 
+            } else if (userObject instanceof RequiredArtifact req) {
+                if (req.type() == RequiredArtifact.Type.FILE) {
+                    setIcon(AllIcons.FileTypes.Any_type);
+                    append("需要文件: ", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES);
+                    append(req.nameOrPath(), SimpleTextAttributes.SIMPLE_CELL_ATTRIBUTES);
+                } else {
+                    setIcon(AllIcons.Nodes.Class);
+                    append("需要类: ", SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES);
+                    append(req.nameOrPath(), SimpleTextAttributes.SIMPLE_CELL_ATTRIBUTES);
+                }
             } else if (leaf) {
                 // 其他叶子节点的备用处理
                 setIcon(AllIcons.Actions.Diff);

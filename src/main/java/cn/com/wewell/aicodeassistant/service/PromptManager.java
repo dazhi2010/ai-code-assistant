@@ -2,8 +2,7 @@ package cn.com.wewell.aicodeassistant.service;
 
 import cn.com.wewell.aicodeassistant.model.AiResponseAction;
 import cn.com.wewell.aicodeassistant.model.CodeSnippet;
-import com.google.gson.Gson;
-import com.google.gson.JsonSyntaxException;
+import com.google.gson.*;
 import com.google.gson.reflect.TypeToken;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.components.Service;
@@ -19,59 +18,56 @@ public final class PromptManager {
 
     private static final String PROMPT_TEMPLATE = """
             请你扮演一位资深的Java开发专家，严格按照我提供的上下文信息和格式要求，为我提供代码解决方案。
-
-            # 上下文信息
-            我当前的项目结构和代码片段如下：
-            %s
-
-            # 任务要求
-            请根据我提供的"我的需求"，分析并给出需要对代码进行哪些修改。
-
-            # 通用编码准则
-            1.  **请勿进行不必要的修改**：例如，不要随意改动代码格式、不要增删不影响功能的空行、不要调整已有导入语句的顺序。只修改与需求直接相关的部分。
-            2.  **注释规范**：所有你新增或修改的代码注释，请务必使用中文。
-
-            # 输出格式要求
-            你必须严格以JSON格式返回你的所有响应，不要有任何额外的解释、注释或引言。
-            JSON的根节点是一个包含多个操作对象的数组。每个操作对象都必须包含 "action" 和 "filePath" 字段。
-
-            **核心原则：请使用代码块本身进行定位，而不是行号。**
-
-            支持的 "action" 类型包括：
-            1.  `CREATE`: 创建一个新文件。需要 "content" 字段。
-            2.  `OVERWRITE`: 覆盖整个文件。当变更非常复杂或涉及文件大部分内容时使用。需要 "content" 字段。
-            3.  `UPDATE`: **（重要）** 更新文件中的一处代码。
-                *   必须包含 `oldCodeBlock` 字段：代表需要被替换的、完整的、多行的原始代码块。
-                *   必须包含 `newCodeBlock` 字段：代表替换后的新代码块。
-            4.  `INSERT_AFTER`: **（重要）** 在指定代码块之后插入新代码。
-                *   必须包含 `oldCodeBlock` 字段：作为锚点，新代码将插入在这一块代码之后。
-                *   必须包含 `newCodeBlock` 字段：要插入的新代码。
-            5.  `DELETE`: **（重要）** 删除文件中的一部分代码。
-                *   必须包含 `oldCodeBlock` 字段：需要被删除的完整代码块。
-
-            **注意**：`oldCodeBlock` 必须是原始文件中连续且唯一的代码片段，以确保能精确匹配。如果代码片段不唯一，请包含更多上下文行来确保唯一性。
-
-            ## JSON格式示例
-            ```json
-            [
-              {
-                "action": "UPDATE",
-                "filePath": "src/main/java/com/example/MyService.java",
-                "oldCodeBlock": "    public int calculate() {\n        return 1 + 1; // 原始实现\n    }",
-                "newCodeBlock": "    /**\n     * 计算总和，这是一个新的中文注释。\n     */\n    public int calculate() {\n        return 2 + 2; // 修正后的实现\n    }"
-              },
-              {
-                "action": "INSERT_AFTER",
-                "filePath": "src/main/java/com/example/MyService.java",
-                "oldCodeBlock": "    public int calculate() {\n        return 2 + 2; // 修正后的实现\n    }",
-                "newCodeBlock": "\n    public void anotherMethod() {\n        // 这是新增的方法\n    }"
-              },
-              {
-                "action": "DELETE",
-                "filePath": "src/main/java/com/example/OldUtil.java",
-                "oldCodeBlock": "    @Deprecated\n    public static void oldFunction() {\n        // no-op\n    }"
-              }
-            ]
+            
+             # 上下文信息
+             我当前的项目结构和代码片段如下：
+             %s
+            
+             # 任务要求
+             请根据我提供的"我的需求"，分析并给出需要对代码进行哪些修改。
+            
+             # 通用编码准则
+             1.  请勿进行不必要的修改（格式、空行、导入顺序等）。只修改与需求直接相关的部分。
+             2.  注释规范：所有你新增或修改的代码注释，请务必使用中文。
+            
+             # 输出格式要求
+             你必须严格以JSON格式返回响应，不要有任何额外的解释或注释。
+             优先返回一个对象，包含：
+             - actions: 操作数组（与之前规范一致）
+             - requires: 若上下文不足，请在此列出需要补充的文件或类
+             若无需补充，也可返回空数组；同时兼容直接返回 `actions` 的数组（向后兼容）。
+            
+             核心原则：使用代码块本身进行定位，而不是行号。
+            
+             支持的 action 类型：
+             1.  CREATE: 创建新文件，需提供 content。
+             2.  OVERWRITE: 覆盖整个文件，需提供 content。
+             3.  UPDATE: 用 newCodeBlock 替换 oldCodeBlock（两者必须存在）。
+             4.  INSERT_AFTER: 在 oldCodeBlock 之后插入 newCodeBlock（两者必须存在）。
+             5.  DELETE: 删除 oldCodeBlock（必须存在）。
+            
+             requires 结构：
+             {
+               "files": ["src/main/java/com/example/A.java", "pom.xml"],
+               "classes": ["com.example.service.UserService", "MyUtil"]
+             }
+            
+             示例：
+             ```json
+             {
+               "actions": [
+                 {
+                   "action": "UPDATE",
+                   "filePath": "src/main/java/com/example/MyService.java",
+                   "oldCodeBlock": "    public int calculate() {\\\\n        return 1 + 1; // 原始实现\\\\n    }",
+                   "newCodeBlock": "    /**\\\\n     * 计算总和，这是一个新的中文注释。\\\\n     */\\\\n    public int calculate() {\\\\n        return 2 + 2; // 修正后的实现\\\\n    }"
+                 }
+               ],
+               "requires": {
+                 "files": ["src/main/java/com/example/Dependent.java"],
+                 "classes": ["com.example.external.ExternalApi"]
+               }
+             }
             ```
 
             请现在开始分析并提供JSON格式的解决方案。
@@ -81,12 +77,23 @@ public final class PromptManager {
     private final StringBuilder inputContent = new StringBuilder();
     private String outputContent = "";
     private List<AiResponseAction> parsedActions = new ArrayList<>();
+    private final List<String> requiredFiles = new ArrayList<>();
+    private final List<String> requiredClasses = new ArrayList<>();
+
+    public List<String> getRequiredFiles() { return requiredFiles; }
+    public List<String> getRequiredClasses() { return requiredClasses; }
 
     private Consumer<String> inputListener;
     private Consumer<String> outputListener;
 
     public static PromptManager getInstance(Project project) {
         return project.getService(PromptManager.class);
+    }
+    // 新增：输入区替换并通知
+    public void setInputContentAndNotify(String text) {
+        inputContent.setLength(0);
+        inputContent.append(text != null ? text : "");
+        notifyInputListener();
     }
 
     public void addCodeSnippet(CodeSnippet snippet) {
@@ -162,18 +169,80 @@ public final class PromptManager {
     }
 
     public boolean parseResponse() {
+        requiredFiles.clear();
+        requiredClasses.clear();
+        parsedActions = new ArrayList<>();
+
         try {
+            JsonElement root = JsonParser.parseString(outputContent);
             Gson gson = new Gson();
-            Type listType = new TypeToken<List<AiResponseAction>>() {
-            }.getType();
-            parsedActions = gson.fromJson(outputContent, listType);
-            if (parsedActions == null || parsedActions.stream().anyMatch(a -> a.action() == null || a.filePath() == null)) {
+
+            if (root.isJsonArray()) {
+                Type listType = new TypeToken<List<AiResponseAction>>(){}.getType();
+                parsedActions = gson.fromJson(root, listType);
+            } else if (root.isJsonObject()) {
+                JsonObject obj = root.getAsJsonObject();
+                // actions 或 changes
+                String actionsKey = obj.has("actions") ? "actions" : (obj.has("changes") ? "changes" : null);
+                if (actionsKey != null) {
+                    Type listType = new TypeToken<List<AiResponseAction>>(){}.getType();
+                    parsedActions = gson.fromJson(obj.get(actionsKey), listType);
+                } else {
+                    parsedActions = new ArrayList<>();
+                }
+                // requires / needs
+                JsonObject requires = null;
+                if (obj.has("requires") && obj.get("requires").isJsonObject()) {
+                    requires = obj.getAsJsonObject("requires");
+                } else if (obj.has("needs") && obj.get("needs").isJsonObject()) {
+                    requires = obj.getAsJsonObject("needs");
+                }
+                if (requires != null) {
+                    if (requires.has("files") && requires.get("files").isJsonArray()) {
+                        for (JsonElement el : requires.getAsJsonArray("files")) {
+                            if (el.isJsonPrimitive()) requiredFiles.add(el.getAsString());
+                        }
+                    } else if (requires.has("needFiles") && requires.get("needFiles").isJsonArray()) {
+                        for (JsonElement el : requires.getAsJsonArray("needFiles")) {
+                            if (el.isJsonPrimitive()) requiredFiles.add(el.getAsString());
+                        }
+                    }
+                    if (requires.has("classes") && requires.get("classes").isJsonArray()) {
+                        for (JsonElement el : requires.getAsJsonArray("classes")) {
+                            if (el.isJsonPrimitive()) requiredClasses.add(el.getAsString());
+                        }
+                    } else if (requires.has("needClasses") && requires.get("needClasses").isJsonArray()) {
+                        for (JsonElement el : requires.getAsJsonArray("needClasses")) {
+                            if (el.isJsonPrimitive()) requiredClasses.add(el.getAsString());
+                        }
+                    }
+                }
+            } else {
                 parsedActions = null;
                 return false;
             }
+
+            // 校验 actions 基本合法性（可为空），但若有 actions 则需字段完整
+            if (parsedActions != null && !parsedActions.isEmpty()) {
+                boolean invalid = parsedActions.stream().anyMatch(a -> a.action() == null || a.filePath() == null);
+                if (invalid) {
+                    parsedActions = null;
+                    return false;
+                }
+            }
+
+            // 成功条件：actions 合法(可空) 或 requires 非空
+            boolean ok = (parsedActions != null) && (!parsedActions.isEmpty() || !requiredFiles.isEmpty() || !requiredClasses.isEmpty());
+            if (!ok) {
+                // 允许空 actions，但 requires 也为空时认为失败
+                return false;
+            }
             return true;
+
         } catch (JsonSyntaxException e) {
             parsedActions = null;
+            requiredFiles.clear();
+            requiredClasses.clear();
             return false;
         }
     }
@@ -183,6 +252,8 @@ public final class PromptManager {
         inputContent.setLength(0);
         outputContent = "";
         parsedActions.clear();
+        requiredFiles.clear();
+        requiredClasses.clear();
         notifyInputListener();
         notifyOutputListener();
     }

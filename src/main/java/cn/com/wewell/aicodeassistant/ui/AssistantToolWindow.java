@@ -2,20 +2,19 @@ package cn.com.wewell.aicodeassistant.ui;
 
 import cn.com.wewell.aicodeassistant.model.AiResponseAction;
 import cn.com.wewell.aicodeassistant.model.FileChanges;
+import cn.com.wewell.aicodeassistant.model.RequiredArtifact;
 import cn.com.wewell.aicodeassistant.service.DiffPresentationService;
 import cn.com.wewell.aicodeassistant.service.HistoryManager;
 import cn.com.wewell.aicodeassistant.service.PromptManager;
 import com.intellij.json.JsonFileType;
-import com.intellij.openapi.actionSystem.ActionManager;
-import com.intellij.openapi.actionSystem.ActionPopupMenu;
-import com.intellij.openapi.actionSystem.ActionToolbar;
-import com.intellij.openapi.actionSystem.DefaultActionGroup;
+import com.intellij.openapi.actionSystem.*;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.editor.EditorFactory;
 import com.intellij.openapi.editor.event.DocumentEvent;
 import com.intellij.openapi.editor.event.DocumentListener;
 import com.intellij.openapi.editor.ex.EditorEx;
 import com.intellij.openapi.fileTypes.FileTypes;
+import com.intellij.openapi.ide.CopyPasteManager;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.ui.SimpleToolWindowPanel;
 import com.intellij.openapi.vfs.LocalFileSystem;
@@ -34,6 +33,7 @@ import javax.swing.*;
 import javax.swing.tree.DefaultMutableTreeNode;
 import javax.swing.tree.DefaultTreeModel;
 import java.awt.*;
+import java.awt.datatransfer.StringSelection;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.io.IOException;
@@ -172,32 +172,67 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
                     if (row != -1) {
                         changesTree.setSelectionRow(row);
                         DefaultMutableTreeNode node = (DefaultMutableTreeNode) changesTree.getLastSelectedPathComponent();
-                        if (node != null && node.isRoot()) {
-                            // 只有在根节点上右键才显示菜单
+                        if (node == null) return;
+
+                        // Root 节点：应用全部变更
+                        if (node.isRoot()) {
                             PromptManager promptManager = PromptManager.getInstance(project);
                             List<AiResponseAction> allActions = promptManager.getParsedActions();
-
                             DefaultActionGroup group = new DefaultActionGroup();
                             group.add(new cn.com.wewell.aicodeassistant.action.tree.ApplyAllChangesAction(allActions));
-
                             ActionPopupMenu popupMenu = ActionManager.getInstance().createActionPopupMenu("AIAssistantTreePopup", group);
+                            popupMenu.getComponent().show(e.getComponent(), e.getX(), e.getY());
+                            return;
+                        }
+
+                        Object uo = node.getUserObject();
+
+                        // 对具体操作节点：复制新内容 / 复制目标内容
+                        if (uo instanceof AiResponseAction) {
+                            DefaultActionGroup group = new DefaultActionGroup();
+                            group.add(new cn.com.wewell.aicodeassistant.action.tree.CopyNewContentAction(node));
+                            group.add(new cn.com.wewell.aicodeassistant.action.tree.CopyOldContentAction(node));
+                            ActionPopupMenu popupMenu = ActionManager.getInstance().createActionPopupMenu("AIAssistantTreePopup.ActionNode", group);
+                            popupMenu.getComponent().show(e.getComponent(), e.getX(), e.getY());
+                            return;
+                        }
+
+                        // 对“所需补充”节点：加载到工作区 / 复制路径或类名
+                        if (uo instanceof RequiredArtifact req) {
+                            DefaultActionGroup group = new DefaultActionGroup();
+                            group.add(new cn.com.wewell.aicodeassistant.action.tree.LoadRequiredArtifactAction(project, req));
+                            group.add(new AnAction("复制名称/路径") {
+                                @Override
+                                public void actionPerformed(@NotNull AnActionEvent e1) {
+                                    CopyPasteManager.getInstance().setContents(new StringSelection(req.nameOrPath()));
+                                }
+                            });
+                            ActionPopupMenu popupMenu = ActionManager.getInstance().createActionPopupMenu("AIAssistantTreePopup.RequireNode", group);
                             popupMenu.getComponent().show(e.getComponent(), e.getX(), e.getY());
                         }
                     }
                 }
             }
 
+            @Override
             public void mouseClicked(MouseEvent e) {
                 if (e.getClickCount() == 2) {
                     DefaultMutableTreeNode node = (DefaultMutableTreeNode) changesTree.getLastSelectedPathComponent();
                     if (node == null) return;
 
+                    Object uo = node.getUserObject();
+
+                    // 双击“所需补充”节点：加载到工作区
+                    if (uo instanceof RequiredArtifact req) {
+                        new cn.com.wewell.aicodeassistant.action.tree.LoadRequiredArtifactAction(project, req).load();
+                        return;
+                    }
+
+                    // 双击文件节点或其子叶子：展示Diff
                     if (node.isLeaf()) {
                         node = (DefaultMutableTreeNode) node.getParent();
                     }
-
-                    if (node != null && node.getUserObject() instanceof FileChanges) {
-                        FileChanges fileChanges = (FileChanges) node.getUserObject();
+                    if (node != null && node.getUserObject() instanceof FileChanges fileChanges) {
                         if (!fileChanges.getActions().isEmpty()) {
                             DiffPresentationService.getInstance(project).showDiffForFile(fileChanges.getActions());
                         }
@@ -256,8 +291,28 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
             }
             root.add(fileNode);
         }
+        // 追加：所需补充
+        PromptManager pm = PromptManager.getInstance(project);
+        List<String> reqFiles = pm.getRequiredFiles();
+        List<String> reqClasses = pm.getRequiredClasses();
+        if ((reqFiles != null && !reqFiles.isEmpty()) || (reqClasses != null && !reqClasses.isEmpty())) {
+            DefaultMutableTreeNode requireRoot = new DefaultMutableTreeNode("所需补充");
+            if (reqFiles != null) {
+                for (String path : reqFiles) {
+                    DefaultMutableTreeNode n = new DefaultMutableTreeNode(new RequiredArtifact(RequiredArtifact.Type.FILE, path));
+                    requireRoot.add(n);
+                }
+            }
+            if (reqClasses != null) {
+                for (String cls : reqClasses) {
+                    DefaultMutableTreeNode n = new DefaultMutableTreeNode(new RequiredArtifact(RequiredArtifact.Type.CLASS, cls));
+                    requireRoot.add(n);
+                }
+            }
+            root.add(requireRoot);
+        }
+
         changesTree.setModel(new DefaultTreeModel(root));
-        // 展开所有节点
         for (int i = 0; i < changesTree.getRowCount(); i++) {
             changesTree.expandRow(i);
         }

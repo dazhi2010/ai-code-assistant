@@ -20,6 +20,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @Service(Service.Level.PROJECT)
 public final class DiffPresentationService {
@@ -118,17 +120,37 @@ public final class DiffPresentationService {
      * 如果找不到或找到多个，则返回 Optional.empty()。
      */
     private Optional<BlockRange> findUniqueBlockOffsets(String content, String blockToFind) {
-        int startIndex = content.indexOf(blockToFind);
-        if (startIndex == -1) {
-            return Optional.empty(); // 找不到
+        // 1) 完全匹配
+        int first = content.indexOf(blockToFind);
+        if (first >= 0) {
+            int last = content.lastIndexOf(blockToFind);
+            if (first != last) return Optional.empty();
+            return Optional.of(new BlockRange(first, first + blockToFind.length()));
         }
+        // 2) 宽松匹配
+        Pattern loose = buildLooseBlockPattern(blockToFind);
+        Matcher m = loose.matcher(content);
+        if (!m.find()) return Optional.empty();
+        int s = m.start(), e = m.end();
+        if (m.find()) return Optional.empty();
+        return Optional.of(new BlockRange(s, e));
+    }
 
-        int lastIndex = content.lastIndexOf(blockToFind);
-        if (startIndex != lastIndex) {
-            return Optional.empty(); // 存在歧义
+    private Pattern buildLooseBlockPattern(String block) {
+        // 与 ChangeApplierService 中的实现完全一致
+        StringBuilder rx = new StringBuilder(block.length() * 2);
+        boolean lineStart = true;
+        for (int i = 0; i < block.length();) {
+            char c = block.charAt(i);
+            if (c == '\r') { i++; continue; }
+            if (c == '\n') { rx.append("(?:\\r?\\n)"); rx.append("[ \\t]*(?:\\*+\\s*)?"); lineStart = true; i++; continue; }
+            if (lineStart) { rx.append("[ \\t]*(?:\\*+\\s*)?"); while (i < block.length() && (block.charAt(i)==' '||block.charAt(i)=='\t'||block.charAt(i)=='*')) i++; lineStart=false; continue; }
+            if (c=='/' && i+1<block.length() && block.charAt(i+1)=='*') { rx.append("/\\*{1,2}"); i+=2; if (i<block.length() && block.charAt(i)=='*') i++; continue; }
+            if (c=='*' && i+1<block.length() && block.charAt(i+1)=='/') { rx.append("\\*+/"); i+=2; continue; }
+            if (c==' ' || c=='\t') { rx.append("[ \\t]+"); while (i<block.length() && (block.charAt(i)==' '||block.charAt(i)=='\t')) i++; continue; }
+            rx.append(Pattern.quote(String.valueOf(c))); i++;
         }
-
-        return Optional.of(new BlockRange(startIndex, startIndex + blockToFind.length()));
+        return Pattern.compile(rx.toString(), Pattern.MULTILINE);
     }
 
     private record DiffData(VirtualFile file, String originalContent) {}

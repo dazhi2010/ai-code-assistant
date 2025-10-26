@@ -24,6 +24,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Service(Service.Level.PROJECT)
@@ -129,7 +131,9 @@ public final class ChangeApplierService {
             if (document == null) return;
 
             findUniqueBlock(document.getText(), action.oldCodeBlock(), action.filePath()).ifPresent(range -> {
-                document.replaceString(range.startOffset(), range.endOffset(), Objects.requireNonNullElse(action.newCodeBlock(), ""));
+                String newText = Objects.requireNonNullElse(action.newCodeBlock(), "");
+                newText = newText.replace("\r\n", "\n");
+                document.replaceString(range.startOffset(), range.endOffset(), newText);
                 FileDocumentManager.getInstance().saveDocument(document);
             });
         });
@@ -141,14 +145,16 @@ public final class ChangeApplierService {
             if (document == null) return;
 
             findUniqueBlock(document.getText(), action.oldCodeBlock(), action.filePath()).ifPresent(range -> {
-                document.insertString(range.endOffset(), Objects.requireNonNullElse(action.newCodeBlock(), ""));
+                String newText = Objects.requireNonNullElse(action.newCodeBlock(), "");
+                newText = newText.replace("\r\n", "\n");
+                document.insertString(range.endOffset(), newText);
                 FileDocumentManager.getInstance().saveDocument(document);
             });
         });
     }
 
     private void applyDeleteByContent(AiResponseAction action) throws IOException {
-        // 如果 oldCodeBlock 为空，则认为是删除整个文件
+        // oldCodeBlock 为空 => 删除整个文件
         if (action.oldCodeBlock() == null || action.oldCodeBlock().isEmpty()) {
             WriteCommandAction.runWriteCommandAction(project, () -> {
                 VirtualFile file = findVirtualFile(action.filePath());
@@ -166,16 +172,59 @@ public final class ChangeApplierService {
             return;
         }
 
-        // 否则，删除文件中的代码块
+        // 否则，删除文件中的代码块；找不到时做“整文件等价”兜底
         WriteCommandAction.runWriteCommandAction(project, () -> {
             Document document = getDocumentForModification(action.filePath());
             if (document == null) return;
 
-            findUniqueBlock(document.getText(), action.oldCodeBlock(), action.filePath()).ifPresent(range -> {
-                document.deleteString(range.startOffset(), range.endOffset());
+            String fileText = document.getText();
+            Optional<BlockRange> range = findUniqueBlock(fileText, action.oldCodeBlock(), action.filePath());
+            if (range.isPresent()) {
+                document.deleteString(range.get().startOffset(), range.get().endOffset());
                 FileDocumentManager.getInstance().saveDocument(document);
-            });
+                return;
+            }
+
+            // 兜底：若 oldCodeBlock 与整文件在“宽松规范化后”完全一致，按“删除整个文件”处理
+            if (contentEquivalentForDeletion(fileText, action.oldCodeBlock())) {
+                VirtualFile file = findVirtualFile(action.filePath());
+                if (file != null && file.exists()) {
+                    try {
+                        file.delete(this);
+                        notifySuccess("文件已删除: " + action.filePath() + "（宽松等价匹配）");
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                } else {
+                    notifyWarning("尝试删除但文件未找到: " + action.filePath());
+                }
+            }
         });
+    }
+
+    private boolean contentEquivalentForDeletion(String fileText, String blockText) {
+        return normalizeForCompare(fileText).equals(normalizeForCompare(blockText));
+    }
+
+    // 规范化：统一换行；去掉每行行首空白与 Javadoc 边界星号；去掉所有空格/Tab
+    private String normalizeForCompare(String s) {
+        if (s == null) return "";
+        s = s.replace("\r\n", "\n").replace("\r", "\n");
+        StringBuilder sb = new StringBuilder(s.length());
+        int i = 0, len = s.length();
+        while (i < len) {
+            int j = s.indexOf('\n', i);
+            if (j == -1) j = len;
+            String line = s.substring(i, j);
+            // 去掉行首空白与若存在的 Javadoc 星号
+            line = line.replaceFirst("^\\s*\\*?\\s*", "");
+            // 去掉所有空格/Tab
+            line = line.replaceAll("[ \\t]+", "");
+            sb.append(line);
+            if (j < len) sb.append('\n');
+            i = j + 1;
+        }
+        return sb.toString();
     }
 
     private Optional<BlockRange> findUniqueBlock(String content, String blockToFind, String filePath) {
@@ -184,19 +233,98 @@ public final class ChangeApplierService {
             return Optional.empty();
         }
 
-        int startIndex = content.indexOf(blockToFind);
-        if (startIndex == -1) {
-            notifyError("应用变更失败：在 " + filePath + " 中找不到指定的代码块。");
-            return Optional.empty();
+        // 1) 先尝试完全匹配
+        int first = content.indexOf(blockToFind);
+        if (first >= 0) {
+            int last = content.lastIndexOf(blockToFind);
+            if (first != last) {
+                notifyError("应用变更失败：在 " + filePath + " 中找到多个相同的代码块，存在歧义。");
+                return Optional.empty();
+            }
+            return Optional.of(new BlockRange(first, first + blockToFind.length()));
         }
 
-        int lastIndex = content.lastIndexOf(blockToFind);
-        if (startIndex != lastIndex) {
-            notifyError("应用变更失败：在 " + filePath + " 中找到多个相同的代码块，存在歧义。");
+        // 2) 宽松匹配（忽略空白/换行差异、Javadoc行首星号、/** vs /*、*/ vs **/）
+        Pattern loose = buildLooseBlockPattern(blockToFind);
+        Matcher m = loose.matcher(content);
+        if (!m.find()) {
+            notifyError("应用变更失败：在 " + filePath + " 中找不到指定的代码块（已使用宽松匹配）。");
             return Optional.empty();
         }
+        int start = m.start();
+        int end = m.end();
 
-        return Optional.of(new BlockRange(startIndex, startIndex + blockToFind.length()));
+        // 确保唯一
+        if (m.find()) {
+            notifyError("应用变更失败：在 " + filePath + " 中找到多个疑似匹配的代码块（宽松匹配），存在歧义。");
+            return Optional.empty();
+        }
+        return Optional.of(new BlockRange(start, end));
+    }
+
+    private Pattern buildLooseBlockPattern(String block) {
+        StringBuilder rx = new StringBuilder(block.length() * 2);
+        boolean lineStart = true;
+
+        for (int i = 0; i < block.length();) {
+            char c = block.charAt(i);
+
+            // 忽略 CR
+            if (c == '\r') { i++; continue; }
+
+            // 换行：兼容 CRLF/LF，并允许行首有/无 Javadoc 星号与空白
+            if (c == '\n') {
+                rx.append("(?:\\r?\\n)"); // 换行
+                // 行首：可选缩进 + 可选一个或多个星号 + 可选空白
+                rx.append("[ \\t]*(?:\\*+\\s*)?");
+                lineStart = true;
+                i++;
+                continue;
+            }
+
+            // 处理块起始行（第一行也视作行首）
+            if (lineStart) {
+                // 容忍开头缩进 + 0..N 星号差异
+                rx.append("[ \\t]*(?:\\*+\\s*)?");
+                // 消耗 block 中行首的空白和星号，避免重复匹配
+                while (i < block.length()) {
+                    char d = block.charAt(i);
+                    if (d == ' ' || d == '\t' || d == '*') { i++; } else break;
+                }
+                lineStart = false;
+                continue;
+            }
+
+            // 统一 "/**" 与 "/*"
+            if (c == '/' && i + 1 < block.length() && block.charAt(i + 1) == '*') {
+                // 允许 1 或 2 个星
+                rx.append("/\\*{1,2}");
+                i += 2; // 跳过 "/*"
+                // 若 old 块是 "/**" 则再跳过一个星
+                if (i < block.length() && block.charAt(i) == '*') i++;
+                continue;
+            }
+
+            // 统一 "*/" 与 "**/"
+            if (c == '*' && i + 1 < block.length() && block.charAt(i + 1) == '/') {
+                rx.append("\\*+/"); // 至少一个星再跟斜杠
+                i += 2;
+                continue;
+            }
+
+            // 折叠空白
+            if (c == ' ' || c == '\t') {
+                rx.append("[ \\t]+");
+                while (i < block.length() && (block.charAt(i) == ' ' || block.charAt(i) == '\t')) i++;
+                continue;
+            }
+
+            // 其他字符按字面匹配
+            rx.append(Pattern.quote(String.valueOf(c)));
+            i++;
+        }
+
+        return Pattern.compile(rx.toString(), Pattern.MULTILINE);
     }
 
     private Document getDocumentForModification(String relativePath) {
