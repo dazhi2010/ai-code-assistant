@@ -117,8 +117,15 @@ public final class PromptManager {
 
     public void generateFullPrompt() {
         String finalPrompt = String.format(PROMPT_TEMPLATE, inputContent.toString());
+        String appendix = """
+                # 生成规则强化（重要）
+                1. 优先使用 UPDATE 表达小范围修改；仅当需要大规模替换整文件时使用 OVERWRITE；仅插入使用 INSERT_AFTER；删除使用 DELETE。
+                2. oldCodeBlock 必须是原文件中唯一且可直接匹配的完整片段：请在目标代码前后各附加若干行上下文，以保证唯一性（必要时包含方法签名/类签名/标签与选择器等）。
+                3. 对于我提供的“紧凑模式”片段（例如 Java 方法体被替换为 { /* body omitted */ }、JS/CSS 规则被省略等），不要对这些省略区域进行修改；若需修改，请在 requires 中列出需要的完整文件或类（使用全限定名）。
+                4. 当定位困难时，扩大 oldCodeBlock 的上下文范围，确保在原文件中仅出现一次；若仍不唯一，请在 requires 中请求更多上下文。
+                """;
         inputContent.setLength(0);
-        inputContent.append(finalPrompt);
+        inputContent.append(finalPrompt).append("\n\n").append(appendix);
         notifyInputListener();
     }
 

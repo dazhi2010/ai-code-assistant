@@ -10,6 +10,9 @@ public final class Constants {
     public static final String CONFIG_FILE = "config.json";
     public static final String CONFIG_PATH = ASSISTANT_DIR + "/" + CONFIG_FILE;
 
+    // Token 预算默认上限（近似 token 估算，字符/4）。可按需调大或接入设置面板。
+    public static final int DEFAULT_TOKEN_LIMIT = 80000;
+
     private Constants() {
         // 私有构造函数，防止实例化
     }

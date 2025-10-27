@@ -47,6 +47,14 @@
             <add-to-group group-id="ProjectViewPopupMenu" anchor="after" relative-to-action="AddToAIAssistant"/>
         </action>
 
+        <!-- 紧凑模式：以结构/签名为主，控制上下文体量 -->
+        <action id="AIAssistant.AddCompactFilesToAssistant"
+                class="cn.com.wewell.aicodeassistant.action.AddCompactFilesToAssistantAction"
+                text="Add to AI Assistant (Compact)"
+                description="以紧凑模式添加选中文件/目录">
+            <add-to-group group-id="ProjectViewPopupMenu" anchor="after" relative-to-action="AIAssistant.AddFilesToAssistant"/>
+        </action>
+
         <!-- 工具窗口的 Action Group -->
         <group id="AIAssistant.ToolWindowActions" popup="false">
             <action id="AIAssistant.GeneratePrompt"

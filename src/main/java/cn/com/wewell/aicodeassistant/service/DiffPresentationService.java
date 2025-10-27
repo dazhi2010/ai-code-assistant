@@ -12,21 +12,31 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.components.Service;
 import com.intellij.openapi.editor.Document;
 import com.intellij.openapi.fileEditor.FileDocumentManager;
+import com.intellij.openapi.fileTypes.FileType;
+import com.intellij.openapi.fileTypes.PlainTextFileType;
+import com.intellij.openapi.progress.ProgressIndicator;
+import com.intellij.openapi.progress.ProgressManager;
+import com.intellij.openapi.progress.Task;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.Computable;
 import com.intellij.openapi.vfs.VirtualFile;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Objects;
 import java.util.Optional;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 @Service(Service.Level.PROJECT)
 public final class DiffPresentationService {
 
     private final Project project;
+
+    // 仅允许一个预览任务并可取消
+    private final java.util.concurrent.atomic.AtomicReference<ProgressIndicator> runningPreview = new java.util.concurrent.atomic.AtomicReference<>();
+    private final java.util.concurrent.atomic.AtomicLong previewSequence = new java.util.concurrent.atomic.AtomicLong(0);
+
+    // 预览安全阈值
+    private static final int PREVIEW_MAX_CHARS = 700_000;      // 预览文本超过则降级
+    private static final int PREVIEW_TIME_BUDGET_MS = 3000;    // 3 秒时间预算
 
     public DiffPresentationService(Project project) {
         this.project = project;
@@ -40,118 +50,158 @@ public final class DiffPresentationService {
         if (actionsForFile == null || actionsForFile.isEmpty()) return;
         String filePath = actionsForFile.get(0).filePath();
 
-        // 1. 读取原始文件内容
-        Computable<DiffData> readComputable = () -> {
-            VirtualFile file = ChangeApplierService.getInstance(project).findVirtualFile(filePath);
-            String originalContent = "";
-            if (file != null && file.exists()) {
-                Document doc = FileDocumentManager.getInstance().getDocument(file);
-                if (doc != null) originalContent = doc.getText();
-            }
-            return new DiffData(file, originalContent);
-        };
-        DiffData diffData = ApplicationManager.getApplication().runReadAction(readComputable);
-        VirtualFile file = diffData.file;
+        // 取消上一个任务，避免堆积
+        ProgressIndicator prev = runningPreview.getAndSet(null);
+        if (prev != null) prev.cancel();
+        long seq = previewSequence.incrementAndGet();
 
-        // 2. 创建左侧内容 (原始文件)
-        DiffContent content1 = DiffContentFactory.getInstance().create(project, diffData.originalContent, file != null ? file.getFileType() : null);
+        ProgressManager.getInstance().run(new Task.Backgroundable(project, "构建差异预览", true) {
+            private SimpleDiffRequest request;
+            private ProgressIndicator myIndicator;
 
-        // 3. 通过字符串操作创建右侧预览内容
-        String previewContent = createPreviewContentByStringManipulation(diffData.originalContent, actionsForFile);
-        DiffContent content2 = DiffContentFactory.getInstance().create(project, previewContent, file != null ? file.getFileType() : null);
+            @Override
+            public void run(@org.jetbrains.annotations.NotNull ProgressIndicator indicator) {
+                myIndicator = indicator;
+                runningPreview.set(indicator);
+                indicator.setIndeterminate(true);
+                indicator.setText("读取原始文件");
 
-        // 4. 创建 Diff 请求
-        String title = "聚合变更预览: " + filePath;
-        SimpleDiffRequest request = new SimpleDiffRequest(title, content1, content2, "当前内容", "AI 生成的最终效果");
+                long startNs = System.nanoTime();
 
-        // 5. 添加“应用”按钮
-        List<AnAction> actions = new ArrayList<>();
-        actions.add(new ApplyChangeAction(actionsForFile));
-        request.putUserData(DiffUserDataKeys.CONTEXT_ACTIONS, actions);
+                // 1) 读取原始文件内容（ReadAction）
+                DiffData diffData = ApplicationManager.getApplication().runReadAction(
+                        (Computable<DiffData>) () -> {
+                            VirtualFile f = ChangeApplierService.getInstance(project).findVirtualFile(filePath);
+                            String originalContent = "";
+                            if (f != null && f.exists()) {
+                                Document doc = FileDocumentManager.getInstance().getDocument(f);
+                                if (doc != null) originalContent = doc.getText();
+                            }
+                            return new DiffData(f, originalContent);
+                        }
+                );
 
-        // 6. 显示 Diff 窗口
-        DiffManager.getInstance().showDiff(project, request);
-    }
+                if (indicator.isCanceled()) return;
+                indicator.setText("生成预览内容");
 
-    private String createPreviewContentByStringManipulation(String originalContent, List<AiResponseAction> actions) {
-        // 优先处理 OVERWRITE 和 CREATE，它们决定了全部内容
-        AiResponseAction overwriteAction = actions.stream().filter(a -> "OVERWRITE".equalsIgnoreCase(a.action())).findFirst().orElse(null);
-        if (overwriteAction != null) return overwriteAction.content();
+                // 2) 构建右侧预览文本（仅精确匹配，避免重型正则）
+                String previewContent = createPreviewContentByStringManipulation(diffData.originalContent, actionsForFile, indicator);
 
-        AiResponseAction createAction = actions.stream().filter(a -> "CREATE".equalsIgnoreCase(a.action())).findFirst().orElse(null);
-        if (createAction != null) return createAction.content();
+                // 3) 超大/超时降级为纯文本，避免语法高亮耗时
+                boolean degrade = isTooBig(diffData.originalContent) || isTooBig(previewContent) || (elapsedMs(startNs) > PREVIEW_TIME_BUDGET_MS);
+                FileType ft = degrade || diffData.file == null ? PlainTextFileType.INSTANCE : diffData.file.getFileType();
 
-        StringBuilder previewBuilder = new StringBuilder(originalContent);
+                if (indicator.isCanceled()) return;
+                indicator.setText("构建 Diff 视图");
 
-        // 按顺序应用变更来生成预览
-        for (AiResponseAction action : actions) {
-            String oldBlock = action.oldCodeBlock();
-            String newBlock = action.newCodeBlock();
+                // 4) 构建 DiffContent（ReadAction 更稳妥）
+                DiffContent content1 = ApplicationManager.getApplication().runReadAction(
+                        (Computable<DiffContent>) () -> DiffContentFactory.getInstance().create(project, diffData.originalContent, ft)
+                );
+                DiffContent content2 = ApplicationManager.getApplication().runReadAction(
+                        (Computable<DiffContent>) () -> DiffContentFactory.getInstance().create(project, previewContent, ft)
+                );
 
-            // 对于需要锚点代码块的操作，如果锚点为空则跳过
-            if (oldBlock == null || oldBlock.isEmpty()) {
-                continue;
-            }
+                String title = "聚合变更预览: " + filePath;
+                request = new SimpleDiffRequest(title, content1, content2, "当前内容", "AI 生成的最终效果");
 
-            // 在当前预览内容中查找唯一的代码块
-            findUniqueBlockOffsets(previewBuilder.toString(), oldBlock).ifPresent(range -> {
-                switch (action.action().toUpperCase()) {
-                    case "UPDATE":
-                        previewBuilder.replace(range.startOffset(), range.endOffset(), Objects.requireNonNullElse(newBlock, ""));
-                        break;
-                    case "INSERT_AFTER":
-                        previewBuilder.insert(range.endOffset(), Objects.requireNonNullElse(newBlock, ""));
-                        break;
-                    case "DELETE":
-                        previewBuilder.delete(range.startOffset(), range.endOffset());
-                        break;
-                    default:
-                        // 其他操作类型在预览中忽略
-                        break;
+                List<AnAction> actions = new ArrayList<>();
+                actions.add(new ApplyChangeAction(actionsForFile));
+                request.putUserData(DiffUserDataKeys.CONTEXT_ACTIONS, actions);
+                if (degrade) {
+                    request.putUserData(DiffUserDataKeys.PLACE, "预览已降级为纯文本以避免性能问题");
                 }
-            });
-        }
+            }
 
-        return previewBuilder.toString();
+            @Override
+            public void onSuccess() {
+                if (myIndicator != null && myIndicator.isCanceled()) return;
+                if (seq != previewSequence.get()) return; // 过期任务不显示
+                if (request != null) {
+                    DiffManager.getInstance().showDiff(project, request);
+                }
+            }
+
+            @Override
+            public void onFinished() {
+                runningPreview.compareAndSet(myIndicator, null);
+            }
+
+            @Override
+            public void onCancel() {
+                runningPreview.compareAndSet(myIndicator, null);
+            }
+        });
     }
 
-    /**
-     * 在给定内容中查找唯一的代码块，并返回其起始和结束偏移量。
-     * 如果找不到或找到多个，则返回 Optional.empty()。
-     */
-    private Optional<BlockRange> findUniqueBlockOffsets(String content, String blockToFind) {
-        // 1) 完全匹配
-        int first = content.indexOf(blockToFind);
-        if (first >= 0) {
-            int last = content.lastIndexOf(blockToFind);
-            if (first != last) return Optional.empty();
-            return Optional.of(new BlockRange(first, first + blockToFind.length()));
+    private String createPreviewContentByStringManipulation(String originalContent, List<AiResponseAction> actions, ProgressIndicator indicator) {
+        // 优先处理 OVERWRITE / CREATE（直接决定全部内容）
+        AiResponseAction overwriteAction = actions.stream().filter(a -> "OVERWRITE".equalsIgnoreCase(a.action())).findFirst().orElse(null);
+        if (overwriteAction != null) return overwriteAction.content() != null ? overwriteAction.content().replace("\r\n", "\n").replace("\r", "\n") : "";
+        AiResponseAction createAction = actions.stream().filter(a -> "CREATE".equalsIgnoreCase(a.action())).findFirst().orElse(null);
+        if (createAction != null) return createAction.content() != null ? createAction.content().replace("\r\n", "\n").replace("\r", "\n") : "";
+
+        String normalized = originalContent == null ? "" : originalContent.replace("\r\n", "\n").replace("\r", "\n");
+        StringBuilder current = new StringBuilder(normalized);
+
+        long deadline = System.nanoTime() + PREVIEW_TIME_BUDGET_MS * 1_000_000L; // 软超时，避免卡住
+        for (AiResponseAction action : actions) {
+            if (indicator != null) indicator.checkCanceled();
+            if (System.nanoTime() > deadline) break; // 超时则中止，展示部分预览
+
+            String oldBlock = action.oldCodeBlock();
+            if (oldBlock == null || oldBlock.isEmpty()) continue;
+
+            Optional<BlockRange> opt = findUniqueBlockOffsetsStrict(current, oldBlock);
+            if (opt.isEmpty()) continue; // 预览中只做精确定位，失败则跳过（避免昂贵正则）
+            BlockRange range = opt.get();
+
+            String type = action.action() != null ? action.action().toUpperCase() : "";
+            switch (type) {
+                case "UPDATE": {
+                    String newBlock = action.newCodeBlock() != null ? action.newCodeBlock().replace("\r\n", "\n").replace("\r", "\n") : "";
+                    current.replace(range.startOffset(), range.endOffset(), newBlock);
+                    break;
+                }
+                case "INSERT_AFTER": {
+                    String newBlock = action.newCodeBlock() != null ? action.newCodeBlock().replace("\r\n", "\n").replace("\r", "\n") : "";
+                    current.insert(range.endOffset(), newBlock);
+                    break;
+                }
+                case "DELETE": {
+                    current.delete(range.startOffset(), range.endOffset());
+                    break;
+                }
+                default: // 忽略
+            }
         }
-        // 2) 宽松匹配
-        Pattern loose = buildLooseBlockPattern(blockToFind);
-        Matcher m = loose.matcher(content);
-        if (!m.find()) return Optional.empty();
-        int s = m.start(), e = m.end();
-        if (m.find()) return Optional.empty();
-        return Optional.of(new BlockRange(s, e));
+        return current.toString();
     }
 
-    private Pattern buildLooseBlockPattern(String block) {
-        // 与 ChangeApplierService 中的实现完全一致
-        StringBuilder rx = new StringBuilder(block.length() * 2);
-        boolean lineStart = true;
-        for (int i = 0; i < block.length();) {
-            char c = block.charAt(i);
-            if (c == '\r') { i++; continue; }
-            if (c == '\n') { rx.append("(?:\\r?\\n)"); rx.append("[ \\t]*(?:\\*+\\s*)?"); lineStart = true; i++; continue; }
-            if (lineStart) { rx.append("[ \\t]*(?:\\*+\\s*)?"); while (i < block.length() && (block.charAt(i)==' '||block.charAt(i)=='\t'||block.charAt(i)=='*')) i++; lineStart=false; continue; }
-            if (c=='/' && i+1<block.length() && block.charAt(i+1)=='*') { rx.append("/\\*{1,2}"); i+=2; if (i<block.length() && block.charAt(i)=='*') i++; continue; }
-            if (c=='*' && i+1<block.length() && block.charAt(i+1)=='/') { rx.append("\\*+/"); i+=2; continue; }
-            if (c==' ' || c=='\t') { rx.append("[ \\t]+"); while (i<block.length() && (block.charAt(i)==' '||block.charAt(i)=='\t')) i++; continue; }
-            rx.append(Pattern.quote(String.valueOf(c))); i++;
+    // 预览仅做精确匹配，避免高成本正则引发卡顿
+    private Optional<BlockRange> findUniqueBlockOffsetsStrict(CharSequence content, String blockToFind) {
+        if (content == null || blockToFind == null || blockToFind.isEmpty()) return Optional.empty();
+
+        int first;
+        int last;
+        if (content instanceof StringBuilder sb) {
+            first = sb.indexOf(blockToFind);
+            last = sb.lastIndexOf(blockToFind);
+        } else if (content instanceof String s) {
+            first = s.indexOf(blockToFind);
+            last = s.lastIndexOf(blockToFind);
+        } else {
+            String s = content.toString();
+            first = s.indexOf(blockToFind);
+            last = s.lastIndexOf(blockToFind);
         }
-        return Pattern.compile(rx.toString(), Pattern.MULTILINE);
+        if (first < 0) return Optional.empty();
+        if (first != last) return Optional.empty(); // 歧义
+        return Optional.of(new BlockRange(first, first + blockToFind.length()));
     }
+
+    private static boolean isTooBig(String s) { return s != null && s.length() > PREVIEW_MAX_CHARS; }
+    private static int elapsedMs(long startNs) { return (int)((System.nanoTime() - startNs) / 1_000_000L); }
 
     private record DiffData(VirtualFile file, String originalContent) {}
     private record BlockRange(int startOffset, int endOffset) {}
