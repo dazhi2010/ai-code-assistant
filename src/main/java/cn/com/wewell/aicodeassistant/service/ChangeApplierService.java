@@ -232,29 +232,56 @@ public final class ChangeApplierService {
             notifyWarning("操作被跳过：代码块为空 on " + filePath);
             return Optional.empty();
         }
+        // 统一换行，避免 CRLF/LF 差异
+        String c = content.replace("\r\n", "\n").replace("\r", "\n");
+        String b = blockToFind.replace("\r\n", "\n").replace("\r", "\n");
 
-        // 1) 先尝试完全匹配
-        int first = content.indexOf(blockToFind);
+        // 1) 完全匹配（唯一）
+        int first = c.indexOf(b);
         if (first >= 0) {
-            int last = content.lastIndexOf(blockToFind);
+            int last = c.lastIndexOf(b);
             if (first != last) {
                 notifyError("应用变更失败：在 " + filePath + " 中找到多个相同的代码块，存在歧义。");
                 return Optional.empty();
             }
-            return Optional.of(new BlockRange(first, first + blockToFind.length()));
+            return Optional.of(new BlockRange(first, first + b.length()));
         }
 
-        // 2) 宽松匹配（忽略空白/换行差异、Javadoc行首星号、/** vs /*、*/ vs **/）
-        Pattern loose = buildLooseBlockPattern(blockToFind);
-        Matcher m = loose.matcher(content);
+        // 2) 修复 JSON/转义差异：把字符串字面量内的实际控制字符重新编码为 \\n/\\t 等，再尝试完全匹配
+        String bFixed = reencodeEscapesInsideQuotes(b);
+        if (!bFixed.equals(b)) {
+            int f2 = c.indexOf(bFixed);
+            if (f2 >= 0) {
+                int l2 = c.lastIndexOf(bFixed);
+                if (f2 != l2) {
+                    notifyError("应用变更失败：在 " + filePath + " 中找到多个相同的代码块（转义修复后），存在歧义。");
+                    return Optional.empty();
+                }
+                return Optional.of(new BlockRange(f2, f2 + bFixed.length()));
+            }
+        }
+
+        // 3) 宽松匹配（忽略空白/换行、Javadoc 行首星号差异），保持唯一
+        Pattern loose = buildLooseBlockPattern(b);
+        Matcher m = loose.matcher(c);
         if (!m.find()) {
-            notifyError("应用变更失败：在 " + filePath + " 中找不到指定的代码块（已使用宽松匹配）。");
+            if (!bFixed.equals(b)) {
+                Pattern looseFixed = buildLooseBlockPattern(bFixed);
+                Matcher m2 = looseFixed.matcher(c);
+                if (m2.find()) {
+                    int s2 = m2.start(), e2 = m2.end();
+                    if (m2.find()) {
+                        notifyError("应用变更失败：在 " + filePath + " 中找到多个疑似匹配的代码块（宽松匹配，转义修复后），存在歧义。");
+                        return Optional.empty();
+                    }
+                    return Optional.of(new BlockRange(s2, e2));
+                }
+            }
+            notifyError("应用变更失败：在 " + filePath + " 中找不到指定的代码块（已尝试转义修复与宽松匹配）。");
             return Optional.empty();
         }
         int start = m.start();
         int end = m.end();
-
-        // 确保唯一
         if (m.find()) {
             notifyError("应用变更失败：在 " + filePath + " 中找到多个疑似匹配的代码块（宽松匹配），存在歧义。");
             return Optional.empty();
@@ -325,6 +352,49 @@ public final class ChangeApplierService {
         }
 
         return Pattern.compile(rx.toString(), Pattern.MULTILINE);
+    }
+    /**
+     * 将字符串字面量中的实际控制字符（\n/\r/\t/\f/\b）重新编码为转义序列（\\n/\\r/\\t/\\f/\\b），仅在成对双引号内生效。
+     * 解决 JSON oldCodeBlock 写成 "\\n" 与源码中的 "\\\n"（文本中的反斜杠+n）不一致导致的匹配失败。
+     */
+    private String reencodeEscapesInsideQuotes(String s) {
+        if (s == null || s.isEmpty()) return s;
+        StringBuilder out = new StringBuilder(s.length() * 2);
+        boolean inStr = false;
+        boolean escaped = false;
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (inStr) {
+                if (escaped) { // 保留已存在的转义，如 \" 或 \\
+                    out.append('\\').append(c);
+                    escaped = false;
+                    continue;
+                }
+                if (c == '\\') { // 下一个字符将被转义
+                    escaped = true;
+                    continue;
+                }
+                if (c == '"') { // 结束引号
+                    inStr = false;
+                    out.append(c);
+                    continue;
+                }
+                // 把字符串内的控制字符重新编码
+                switch (c) {
+                    case '\n': out.append("\\n"); break;
+                    case '\r': out.append("\\r"); break;
+                    case '\t': out.append("\\t"); break;
+                    case '\f': out.append("\\f"); break;
+                    case '\b': out.append("\\b"); break;
+                    default: out.append(c);
+                }
+            } else {
+                if (c == '"') inStr = true;
+                out.append(c);
+            }
+        }
+        if (escaped) out.append('\\'); // 处理结尾悬空的反斜杠
+        return out.toString();
     }
 
     private Document getDocumentForModification(String relativePath) {
