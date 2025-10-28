@@ -123,6 +123,9 @@ public final class PromptManager {
                 2. oldCodeBlock 必须是原文件中唯一且可直接匹配的完整片段：请在目标代码前后各附加若干行上下文，以保证唯一性（必要时包含方法签名/类签名/标签与选择器等）。
                 3. 对于我提供的“紧凑模式”片段（例如 Java 方法体被替换为 { /* body omitted */ }、JS/CSS 规则被省略等），不要对这些省略区域进行修改；若需修改，请在 requires 中列出需要的完整文件或类（使用全限定名）。
                 4. 当定位困难时，扩大 oldCodeBlock 的上下文范围，确保在原文件中仅出现一次；若仍不唯一，请在 requires 中请求更多上下文。
+                5. 当 requires 非空时，只返回 requires，不要在同一响应中返回 actions；等待我补齐所需文件/类后再继续。
+                6. 若需要很多文件或类，请一次性完整列出清单，不要分批请求。
+                7. files 与 classes 不要重复；若两者都能表达同一实体，优先使用 files。
                 """;
         inputContent.setLength(0);
         inputContent.append(finalPrompt).append("\n\n").append(appendix);
@@ -223,6 +226,46 @@ public final class PromptManager {
                             if (el.isJsonPrimitive()) requiredClasses.add(el.getAsString());
                         }
                     }
+                }                // 规范化与去重：文件与类不要重复（文件优先）
+                {
+                    java.util.LinkedHashSet<String> files = new java.util.LinkedHashSet<>();
+                    for (String f : new java.util.ArrayList<>(requiredFiles)) {
+                        if (f != null) {
+                            String norm = f.trim().replace('\\', '/');
+                            if (!norm.isBlank()) files.add(norm);
+                        }
+                    }
+                    java.util.LinkedHashSet<String> classes = new java.util.LinkedHashSet<>();
+                    for (String c : new java.util.ArrayList<>(requiredClasses)) {
+                        if (c != null) {
+                            String norm = c.trim();
+                            if (!norm.isBlank()) classes.add(norm);
+                        }
+                    }
+                    // 基于文件名的跨类型去重（优先保留文件）
+                    java.util.Set<String> fileBaseNames = new java.util.HashSet<>();
+                    for (String p : files) {
+                        String path = p;
+                        int slash = path.lastIndexOf('/');
+                        String name = slash >= 0 ? path.substring(slash + 1) : path;
+                        int dot = name.lastIndexOf('.');
+                        String base = dot >= 0 ? name.substring(0, dot) : name;
+                        fileBaseNames.add(base.toLowerCase(java.util.Locale.ROOT));
+                    }
+                    classes.removeIf(fqn -> {
+                        int dot = fqn.lastIndexOf('.');
+                        String simple = dot >= 0 ? fqn.substring(dot + 1) : fqn;
+                        return fileBaseNames.contains(simple.toLowerCase(java.util.Locale.ROOT));
+                    });
+                    requiredFiles.clear();
+                    requiredFiles.addAll(files);
+                    requiredClasses.clear();
+                    requiredClasses.addAll(classes);
+                }
+
+                // 当 requires 非空时，遵循约定：只请求，不给出变更（等待用户补齐上下文）
+                if (!requiredFiles.isEmpty() || !requiredClasses.isEmpty()) {
+                    parsedActions = new java.util.ArrayList<>();
                 }
             } else {
                 parsedActions = null;

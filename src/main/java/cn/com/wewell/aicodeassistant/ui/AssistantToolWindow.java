@@ -174,18 +174,27 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
                         DefaultMutableTreeNode node = (DefaultMutableTreeNode) changesTree.getLastSelectedPathComponent();
                         if (node == null) return;
 
-                        // Root 节点：应用全部变更
+                        // Root 节点：应用全部变更 / 一键加载所需上下文
                         if (node.isRoot()) {
                             PromptManager promptManager = PromptManager.getInstance(project);
                             List<AiResponseAction> allActions = promptManager.getParsedActions();
                             DefaultActionGroup group = new DefaultActionGroup();
                             group.add(new cn.com.wewell.aicodeassistant.action.tree.ApplyAllChangesAction(allActions));
+                            // 新增：一键加载全部所需上下文
+                            group.add(new cn.com.wewell.aicodeassistant.action.tree.LoadAllRequiredArtifactsAction(project));
                             ActionPopupMenu popupMenu = ActionManager.getInstance().createActionPopupMenu("AIAssistantTreePopup", group);
                             popupMenu.getComponent().show(e.getComponent(), e.getX(), e.getY());
                             return;
                         }
 
-                        Object uo = node.getUserObject();
+                        Object uo = node.getUserObject();                        // 对“所需补充”分组节点：一键全部加载
+                        if (uo instanceof String s && "所需补充".equals(s)) {
+                            DefaultActionGroup group = new DefaultActionGroup();
+                            group.add(new cn.com.wewell.aicodeassistant.action.tree.LoadAllRequiredArtifactsAction(project));
+                            ActionPopupMenu popupMenu = ActionManager.getInstance().createActionPopupMenu("AIAssistantTreePopup.RequireRoot", group);
+                            popupMenu.getComponent().show(e.getComponent(), e.getX(), e.getY());
+                            return;
+                        }
 
                         // 对具体操作节点：复制新内容 / 复制目标内容
                         if (uo instanceof AiResponseAction) {
