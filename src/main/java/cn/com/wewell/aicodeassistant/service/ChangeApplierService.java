@@ -98,9 +98,26 @@ public final class ChangeApplierService {
 
             try {
                 VirtualFile parentVirtualDir = VfsUtil.createDirectories(parentDir.getAbsolutePath());
-                VirtualFile newFile = parentVirtualDir.createChildData(this, targetFile.getName());
-                newFile.setBinaryContent(action.content().getBytes());
-                formatFile(newFile);
+                if (parentVirtualDir == null) {
+                    throw new IOException("无法创建目录: " + parentDir.getAbsolutePath());
+                }
+
+                VirtualFile newFile = parentVirtualDir.findChild(targetFile.getName());
+                if (newFile == null) {
+                    newFile = parentVirtualDir.createChildData(this, targetFile.getName());
+                }
+                
+                String content = action.content();
+                if (content == null || content.isBlank()) {
+                    content = action.newCodeBlock();
+                }
+                
+                if (content != null) {
+                    newFile.setBinaryContent(content.getBytes());
+                    formatFile(newFile);
+                } else {
+                    notifyWarning("创建文件 " + action.filePath() + " 失败：没有提供内容 (content 或 newCodeBlock 为空)");
+                }
             } catch (IOException e) {
                 throw new RuntimeException(e);
             }

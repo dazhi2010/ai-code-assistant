@@ -207,6 +207,17 @@ public final class PromptManager {
                 if (actionsKey != null && obj.get(actionsKey).isJsonArray()) {
                     Type listType = new TypeToken<List<AiResponseAction>>(){}.getType();
                     parsedActions = gson.fromJson(obj.get(actionsKey), listType);
+                    
+                    // 填充 CREATE/OVERWRITE 的 content 字段
+                    if (parsedActions != null) {
+                        for (AiResponseAction action : parsedActions) {
+                            if (("CREATE".equalsIgnoreCase(action.action()) || "OVERWRITE".equalsIgnoreCase(action.action()))
+                                    && (action.content() == null || action.content().isBlank())
+                                    && action.newCodeBlock() != null) {
+                                action.setContent(action.newCodeBlock());
+                            }
+                        }
+                    }
                 }
 
                 // 提取 requires

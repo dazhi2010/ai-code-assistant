@@ -112,10 +112,6 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
         jsonScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
         rightPanel.add(jsonScroll, JSON_INPUT_CARD);
 
-        // 初始化变更预览容器
-        changesTree = new Tree(new DefaultMutableTreeNode("变更摘要"));
-        changesTree.setCellRenderer(new ChangeTreeCellRenderer());
-        
         // 初始化 AI 洞察面板
         insightArea = new JTextArea();
         insightArea.setEditable(false);
@@ -125,22 +121,70 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
         insightArea.setFont(JBUI.Fonts.label().deriveFont(12f));
         insightArea.setBorder(JBUI.Borders.empty(5));
         
+        JBScrollPane insightScroll = new JBScrollPane(insightArea);
+        insightScroll.setBorder(JBUI.Borders.empty());
+
         insightPanel = new JPanel(new BorderLayout());
         insightPanel.setBackground(insightArea.getBackground());
         insightPanel.setBorder(JBUI.Borders.customLine(com.intellij.ui.JBColor.border(), 0, 0, 1, 0));
-        insightPanel.add(insightArea, BorderLayout.CENTER);
+        
+        // 添加折叠功能
+        JPanel insightHeader = new JPanel(new BorderLayout());
+        insightHeader.setBackground(JBUI.CurrentTheme.EditorTabs.background());
+        insightHeader.setBorder(JBUI.Borders.empty(2, 5));
+        JLabel titleLabel = new JLabel("思路与反馈");
+        titleLabel.setFont(JBUI.Fonts.label().asBold());
+        JButton toggleBtn = new JButton(com.intellij.icons.AllIcons.General.ArrowDown);
+        toggleBtn.setBorderPainted(false);
+        toggleBtn.setContentAreaFilled(false);
+        toggleBtn.setFocusPainted(false);
+        toggleBtn.setMargin(JBUI.emptyInsets());
+        
+        insightHeader.add(titleLabel, BorderLayout.WEST);
+        insightHeader.add(toggleBtn, BorderLayout.EAST);
+        
+        insightPanel.add(insightHeader, BorderLayout.NORTH);
+        insightPanel.add(insightScroll, BorderLayout.CENTER);
         insightPanel.setVisible(false);
 
+        // 初始化变更树
+        changesTree = new Tree(new DefaultMutableTreeNode("变更摘要"));
+        changesTree.setCellRenderer(new ChangeTreeCellRenderer());
+        JBScrollPane treeScroll = new JBScrollPane(changesTree);
+        
+        JSplitPane previewSplit = new JSplitPane(JSplitPane.VERTICAL_SPLIT, insightPanel, treeScroll);
+        previewSplit.setDividerLocation(0.5);
+        previewSplit.setResizeWeight(0.5);
+        previewSplit.setBorder(JBUI.Borders.empty());
+
+        toggleBtn.addActionListener(al -> {
+            boolean isVisible = insightScroll.isVisible();
+            insightScroll.setVisible(!isVisible);
+            toggleBtn.setIcon(isVisible ? com.intellij.icons.AllIcons.General.ArrowRight : com.intellij.icons.AllIcons.General.ArrowDown);
+            previewSplit.revalidate();
+            if (!isVisible) {
+                previewSplit.setDividerLocation(0.5);
+            } else {
+                previewSplit.setDividerLocation(insightHeader.getPreferredSize().height);
+            }
+        });
+
         JPanel previewContainer = new JPanel(new BorderLayout());
-        previewContainer.add(insightPanel, BorderLayout.NORTH);
-        previewContainer.add(new JBScrollPane(changesTree), BorderLayout.CENTER);
+        previewContainer.add(previewSplit, BorderLayout.CENTER);
         
         rightPanel.add(previewContainer, CHANGES_PREVIEW_CARD);
 
-        JBScrollPane inputScroll = new JBScrollPane(inputArea);
-        inputScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+        inputArea.setPlaceholder("在这里输入您的需求...");
+        inputArea.addSettingsProvider((EditorEx editor) -> {
+            editor.getSettings().setUseSoftWraps(true);
+            editor.getSettings().setWrapWhenTypingReachesRightMargin(true);
+            editor.setHorizontalScrollbarVisible(false);
+            editor.setVerticalScrollbarVisible(true);
+            editor.getSettings().setLineNumbersShown(false);
+            editor.getSettings().setAdditionalLinesCount(2);
+        });
 
-        JSplitPane splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, inputScroll, rightPanel);
+        JSplitPane splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, inputArea, rightPanel);
         splitPane.setResizeWeight(0.5);
         mainPanel.add(splitPane, BorderLayout.CENTER);
         tabbedPane.addTab("工作区", mainPanel);
