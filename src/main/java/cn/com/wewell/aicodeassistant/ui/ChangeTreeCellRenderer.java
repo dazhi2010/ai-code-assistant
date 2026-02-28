@@ -43,13 +43,22 @@ public class ChangeTreeCellRenderer extends ColoredTreeCellRenderer {
                     append(" (内容: \"" + contentSnippet + "\")", SimpleTextAttributes.GRAY_ATTRIBUTES);
                 }
 
-                // 3. 设置 Tooltip 显示新代码
+                // 3. 设置 Tooltip 显示变更说明和预览
+                StringBuilder tooltip = new StringBuilder("<html><body style='width: 400px;'>");
+                if (action.explanation() != null && !action.explanation().isBlank()) {
+                    tooltip.append("<b>变更说明:</b><br/>")
+                           .append(action.explanation().replace("\n", "<br/>"))
+                           .append("<br/><br/>");
+                }
+                
                 String newCode = action.newCodeBlock() != null ? action.newCodeBlock() : action.content();
                 if (newCode != null && !newCode.isEmpty()) {
-                    // 使用 HTML 和 <pre> 标签来保持格式，并转义HTML特殊字符
-                    String escapedCode = newCode.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
-                    setToolTipText("<html><pre>" + escapedCode + "</pre></html>");
+                    tooltip.append("<b>代码预览:</b><br/><pre>")
+                           .append(newCode.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+                           .append("</pre>");
                 }
+                tooltip.append("</body></html>");
+                setToolTipText(tooltip.toString());
 
             } else if (userObject instanceof RequiredArtifact req) {
                 if (req.type() == RequiredArtifact.Type.FILE) {

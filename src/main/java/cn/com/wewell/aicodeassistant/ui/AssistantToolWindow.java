@@ -41,6 +41,10 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * AI 助手主窗口
+ * @author yuqf
+ */
 public class AssistantToolWindow extends SimpleToolWindowPanel {
 
     private static final String JSON_INPUT_CARD = "JSON_INPUT_CARD";
@@ -54,6 +58,10 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
     private final CardLayout rightCardLayout;
     private final JBTextField themeField;
     private final JBList<VirtualFile> historyList;
+    
+    // 新增：AI 洞察展示区
+    private final JTextArea insightArea;
+    private final JPanel insightPanel;
 
     public AssistantToolWindow(Project project) {
         super(true, true);
@@ -66,7 +74,6 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
         ActionToolbar actionToolbar = actionManager.createActionToolbar("AIAssistantToolbar", actionGroup, true);
         actionToolbar.setTargetComponent(this);
 
-        // --- 恢复的、正确的初始化代码 ---
         themeField = new JBTextField("默认主题");
         JPanel themePanel = new JPanel(new BorderLayout());
         themePanel.setBorder(JBUI.Borders.emptyLeft(10));
@@ -77,50 +84,59 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
         toolbarPanel.add(actionToolbar.getComponent(), BorderLayout.CENTER);
         toolbarPanel.add(themePanel, BorderLayout.EAST);
         setToolbar(toolbarPanel);
-        // ---------------------------------
 
-        // --- 主工作区 (Tabbed Pane) ---
+        // --- 主工作区 ---
         JBTabbedPane tabbedPane = new JBTabbedPane();
 
-        // Tab 1: 主工作区
         JPanel mainPanel = new JPanel(new BorderLayout());
         inputArea = new EditorTextField(EditorFactory.getInstance().createDocument(""), project, FileTypes.PLAIN_TEXT, false, true);
         inputArea.setOneLineMode(false);
-        // 中文注释：通过 SettingsProvider 关闭横向滚动条并开启自动换行（确保在编辑器创建后生效）
         inputArea.addSettingsProvider((EditorEx editor) -> {
             editor.getSettings().setUseSoftWraps(true);
             editor.getSettings().setWrapWhenTypingReachesRightMargin(true);
             editor.setHorizontalScrollbarVisible(false);
         });
-        if (inputArea.getEditor() != null) {
-            inputArea.getEditor().getSettings().setUseSoftWraps(true); // 兜底：有时构造阶段已创建编辑器
-        }
 
         rightCardLayout = new CardLayout();
         rightPanel = new JPanel(rightCardLayout);
 
         outputJsonArea = new EditorTextField(EditorFactory.getInstance().createDocument(""), project, JsonFileType.INSTANCE, false, true);
         outputJsonArea.setOneLineMode(false);
-        // 中文注释：同样优化 JSON 输出区的编辑器滚动条与自动换行
         outputJsonArea.addSettingsProvider((EditorEx editor) -> {
             editor.getSettings().setUseSoftWraps(true);
             editor.getSettings().setWrapWhenTypingReachesRightMargin(true);
             editor.setHorizontalScrollbarVisible(false);
         });
-        if (outputJsonArea.getEditor() != null) {
-            outputJsonArea.getEditor().getSettings().setUseSoftWraps(true);
-        }
 
-        // 中文注释：右侧 JSON 输入卡片使用 JBScrollPane，但强制关闭横向滚动条
         JBScrollPane jsonScroll = new JBScrollPane(outputJsonArea);
         jsonScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
         rightPanel.add(jsonScroll, JSON_INPUT_CARD);
 
+        // 初始化变更预览容器
         changesTree = new Tree(new DefaultMutableTreeNode("变更摘要"));
         changesTree.setCellRenderer(new ChangeTreeCellRenderer());
-        rightPanel.add(new JBScrollPane(changesTree), CHANGES_PREVIEW_CARD);
+        
+        // 初始化 AI 洞察面板
+        insightArea = new JTextArea();
+        insightArea.setEditable(false);
+        insightArea.setLineWrap(true);
+        insightArea.setWrapStyleWord(true);
+        insightArea.setBackground(JBUI.CurrentTheme.EditorTabs.background());
+        insightArea.setFont(JBUI.Fonts.label().deriveFont(12f));
+        insightArea.setBorder(JBUI.Borders.empty(5));
+        
+        insightPanel = new JPanel(new BorderLayout());
+        insightPanel.setBackground(insightArea.getBackground());
+        insightPanel.setBorder(JBUI.Borders.customLine(com.intellij.ui.JBColor.border(), 0, 0, 1, 0));
+        insightPanel.add(insightArea, BorderLayout.CENTER);
+        insightPanel.setVisible(false);
 
-        // 中文注释：左侧输入区同样关闭横向滚动条
+        JPanel previewContainer = new JPanel(new BorderLayout());
+        previewContainer.add(insightPanel, BorderLayout.NORTH);
+        previewContainer.add(new JBScrollPane(changesTree), BorderLayout.CENTER);
+        
+        rightPanel.add(previewContainer, CHANGES_PREVIEW_CARD);
+
         JBScrollPane inputScroll = new JBScrollPane(inputArea);
         inputScroll.setHorizontalScrollBarPolicy(ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
 
@@ -129,7 +145,7 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
         mainPanel.add(splitPane, BorderLayout.CENTER);
         tabbedPane.addTab("工作区", mainPanel);
 
-        // Tab 2: 历史记录
+        // 历史记录
         historyList = new JBList<>();
         historyList.setCellRenderer(new HistoryListCellRenderer());
         JPanel historyPanel = new JPanel(new BorderLayout());
@@ -138,7 +154,7 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
 
         setContent(tabbedPane);
 
-        // --- 绑定服务和UI ---
+        // --- 绑定服务 ---
         PromptManager promptManager = PromptManager.getInstance(project);
         promptManager.setInputListener(text -> {
             if (!inputArea.getText().equals(text)) {
@@ -156,14 +172,14 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
                 promptManager.syncInputContent(event.getDocument().getText());
             }
         });
-        // 为右侧输出区添加监听器，实现双向绑定
         outputJsonArea.getDocument().addDocumentListener(new DocumentListener() {
             @Override
             public void documentChanged(@NotNull DocumentEvent event) {
                 promptManager.syncOutputContent(event.getDocument().getText());
             }
         });
-        // 添加双击事件监听器
+
+        // 变更树监听
         changesTree.addMouseListener(new MouseAdapter() {
             @Override
             public void mousePressed(MouseEvent e) {
@@ -174,20 +190,16 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
                         DefaultMutableTreeNode node = (DefaultMutableTreeNode) changesTree.getLastSelectedPathComponent();
                         if (node == null) return;
 
-                        // Root 节点：应用全部变更 / 一键加载所需上下文
                         if (node.isRoot()) {
-                            PromptManager promptManager = PromptManager.getInstance(project);
-                            List<AiResponseAction> allActions = promptManager.getParsedActions();
                             DefaultActionGroup group = new DefaultActionGroup();
-                            group.add(new cn.com.wewell.aicodeassistant.action.tree.ApplyAllChangesAction(allActions));
-                            // 新增：一键加载全部所需上下文
+                            group.add(new cn.com.wewell.aicodeassistant.action.tree.ApplyAllChangesAction(promptManager.getParsedActions()));
                             group.add(new cn.com.wewell.aicodeassistant.action.tree.LoadAllRequiredArtifactsAction(project));
                             ActionPopupMenu popupMenu = ActionManager.getInstance().createActionPopupMenu("AIAssistantTreePopup", group);
                             popupMenu.getComponent().show(e.getComponent(), e.getX(), e.getY());
                             return;
                         }
 
-                        Object uo = node.getUserObject();                        // 对“所需补充”分组节点：一键全部加载
+                        Object uo = node.getUserObject();
                         if (uo instanceof String s && "所需补充".equals(s)) {
                             DefaultActionGroup group = new DefaultActionGroup();
                             group.add(new cn.com.wewell.aicodeassistant.action.tree.LoadAllRequiredArtifactsAction(project));
@@ -196,17 +208,36 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
                             return;
                         }
 
-                        // 对具体操作节点：复制新内容 / 复制目标内容
-                        if (uo instanceof AiResponseAction) {
+                        if (uo instanceof AiResponseAction action) {
                             DefaultActionGroup group = new DefaultActionGroup();
+                            group.add(new cn.com.wewell.aicodeassistant.action.tree.CompareAction(node));
+                            group.addSeparator();
                             group.add(new cn.com.wewell.aicodeassistant.action.tree.CopyNewContentAction(node));
                             group.add(new cn.com.wewell.aicodeassistant.action.tree.CopyOldContentAction(node));
+                            group.addSeparator();
+                            group.add(new AnAction("删除") {
+                                @Override
+                                public void actionPerformed(@NotNull AnActionEvent e1) {
+                                    promptManager.getParsedActions().remove(action);
+                                    
+                                    DefaultMutableTreeNode parentNode = (DefaultMutableTreeNode) node.getParent();
+                                    if (parentNode != null && parentNode.getUserObject() instanceof FileChanges fileChanges) {
+                                        // 修复预览 Bug：同步从 FileChanges 列表中删除
+                                        fileChanges.getActions().remove(action);
+                                    }
+
+                                    DefaultTreeModel model = (DefaultTreeModel) changesTree.getModel();
+                                    model.removeNodeFromParent(node);
+                                    if (parentNode != null && parentNode.getChildCount() == 0 && !parentNode.isRoot()) {
+                                        model.removeNodeFromParent(parentNode);
+                                    }
+                                }
+                            });
                             ActionPopupMenu popupMenu = ActionManager.getInstance().createActionPopupMenu("AIAssistantTreePopup.ActionNode", group);
                             popupMenu.getComponent().show(e.getComponent(), e.getX(), e.getY());
                             return;
                         }
 
-                        // 对“所需补充”节点：加载到工作区 / 复制路径或类名
                         if (uo instanceof RequiredArtifact req) {
                             DefaultActionGroup group = new DefaultActionGroup();
                             group.add(new cn.com.wewell.aicodeassistant.action.tree.LoadRequiredArtifactAction(project, req));
@@ -230,17 +261,12 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
                     if (node == null) return;
 
                     Object uo = node.getUserObject();
-
-                    // 双击“所需补充”节点：加载到工作区
                     if (uo instanceof RequiredArtifact req) {
                         new cn.com.wewell.aicodeassistant.action.tree.LoadRequiredArtifactAction(project, req).load();
                         return;
                     }
 
-                    // 双击文件节点或其子叶子：展示Diff
-                    if (node.isLeaf()) {
-                        node = (DefaultMutableTreeNode) node.getParent();
-                    }
+                    if (node.isLeaf()) node = (DefaultMutableTreeNode) node.getParent();
                     if (node != null && node.getUserObject() instanceof FileChanges fileChanges) {
                         if (!fileChanges.getActions().isEmpty()) {
                             DiffPresentationService.getInstance(project).showDiffForFile(fileChanges.getActions());
@@ -249,14 +275,11 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
                 }
             }
         });
-        // --- 事件监听 ---
+
         tabbedPane.addChangeListener(e -> {
-            if (tabbedPane.getSelectedIndex() == 1) {
-                refreshHistoryList();
-            }
+            if (tabbedPane.getSelectedIndex() == 1) refreshHistoryList();
         });
 
-        // 双击历史记录项时，恢复内容
         historyList.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
@@ -264,22 +287,14 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
                     VirtualFile selectedDir = historyList.getSelectedValue();
                     if (selectedDir != null) {
                         try {
-                            VirtualFile requestFile = selectedDir.findChild("request.md");
-                            VirtualFile responseFile = selectedDir.findChild("response.json");
-                            if (requestFile != null && responseFile != null) {
-                                String requestContent = VfsUtil.loadText(requestFile);
-                                String responseContent = VfsUtil.loadText(responseFile);
-
-                                // 注意：这里获取了新的 promptManager 实例，可能与上面的不是同一个
-                                PromptManager pm = PromptManager.getInstance(project);
-                                pm.syncInputContent(requestContent);
-                                pm.setOutputContentAndNotify(responseContent);
-
+                            VirtualFile reqFile = selectedDir.findChild("request.md");
+                            VirtualFile resFile = selectedDir.findChild("response.json");
+                            if (reqFile != null && resFile != null) {
+                                promptManager.syncInputContent(VfsUtil.loadText(reqFile));
+                                promptManager.setOutputContentAndNotify(VfsUtil.loadText(resFile));
                                 tabbedPane.setSelectedIndex(0);
                             }
-                        } catch (IOException ex) {
-                            ex.printStackTrace();
-                        }
+                        } catch (IOException ex) { ex.printStackTrace(); }
                     }
                 }
             }
@@ -287,58 +302,55 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
     }
 
     public void showChangesPreview(Map<String, List<AiResponseAction>> groupedActions) {
+        PromptManager pm = PromptManager.getInstance(project);
+        
+        // 刷新 AI 洞察区域
+        StringBuilder insightText = new StringBuilder();
+        if (pm.getAiThought() != null && !pm.getAiThought().isBlank()) {
+            insightText.append("💡 思路: ").append(pm.getAiThought()).append("\n\n");
+        }
+        if (pm.getAiFeedback() != null && !pm.getAiFeedback().isBlank()) {
+            insightText.append("📣 反馈: ").append(pm.getAiFeedback()).append("\n\n");
+        }
+        if (pm.getAiCommands() != null && !pm.getAiCommands().isEmpty()) {
+            insightText.append("💻 命令: ").append(String.join("; ", pm.getAiCommands()));
+        }
+        
+        String finalInsight = insightText.toString().trim();
+        insightArea.setText(finalInsight);
+        insightPanel.setVisible(!finalInsight.isEmpty());
+
         DefaultMutableTreeNode root = new DefaultMutableTreeNode("变更摘要");
         for (Map.Entry<String, List<AiResponseAction>> entry : groupedActions.entrySet()) {
-            // 使用 FileChanges 包装类
             FileChanges fileChanges = new FileChanges(entry.getKey(), entry.getValue());
             DefaultMutableTreeNode fileNode = new DefaultMutableTreeNode(fileChanges);
-
             for (AiResponseAction action : entry.getValue()) {
-                // 直接将 action 对象作为 userObject
-                DefaultMutableTreeNode actionNode = new DefaultMutableTreeNode(action);
-                fileNode.add(actionNode);
+                fileNode.add(new DefaultMutableTreeNode(action));
             }
             root.add(fileNode);
         }
-        // 追加：所需补充
-        PromptManager pm = PromptManager.getInstance(project);
+
         List<String> reqFiles = pm.getRequiredFiles();
         List<String> reqClasses = pm.getRequiredClasses();
         if ((reqFiles != null && !reqFiles.isEmpty()) || (reqClasses != null && !reqClasses.isEmpty())) {
             DefaultMutableTreeNode requireRoot = new DefaultMutableTreeNode("所需补充");
             if (reqFiles != null) {
-                for (String path : reqFiles) {
-                    DefaultMutableTreeNode n = new DefaultMutableTreeNode(new RequiredArtifact(RequiredArtifact.Type.FILE, path));
-                    requireRoot.add(n);
-                }
+                for (String path : reqFiles) requireRoot.add(new DefaultMutableTreeNode(new RequiredArtifact(RequiredArtifact.Type.FILE, path)));
             }
             if (reqClasses != null) {
-                for (String cls : reqClasses) {
-                    DefaultMutableTreeNode n = new DefaultMutableTreeNode(new RequiredArtifact(RequiredArtifact.Type.CLASS, cls));
-                    requireRoot.add(n);
-                }
+                for (String cls : reqClasses) requireRoot.add(new DefaultMutableTreeNode(new RequiredArtifact(RequiredArtifact.Type.CLASS, cls)));
             }
             root.add(requireRoot);
         }
 
         changesTree.setModel(new DefaultTreeModel(root));
-        for (int i = 0; i < changesTree.getRowCount(); i++) {
-            changesTree.expandRow(i);
-        }
+        for (int i = 0; i < changesTree.getRowCount(); i++) changesTree.expandRow(i);
         rightCardLayout.show(rightPanel, CHANGES_PREVIEW_CARD);
     }
 
-    public void showJsonInputView() {
-        rightCardLayout.show(rightPanel, JSON_INPUT_CARD);
-    }
+    public void showJsonInputView() { rightCardLayout.show(rightPanel, JSON_INPUT_CARD); }
+    public String getTheme() { return themeField.getText(); }
 
-
-
-    public String getTheme() {
-        return themeField.getText();
-    }
-
-    // 重新添加丢失的 syncInitialState 方法
     public void syncInitialState(String input, String output) {
         ApplicationManager.getApplication().runWriteAction(() -> {
             inputArea.setText(input);
@@ -350,16 +362,12 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
         String historyPath = project.getBasePath() + "/" + HistoryManager.HISTORY_DIR;
         VirtualFile historyDir = LocalFileSystem.getInstance().findFileByPath(historyPath);
         if (historyDir != null && historyDir.isDirectory()) {
-            // 刷新以确保看到最新内容
             historyDir.refresh(false, true);
             VirtualFile[] children = historyDir.getChildren();
-            // 按名称倒序排序，最新的在最上面
             Arrays.sort(children, (f1, f2) -> f2.getName().compareTo(f1.getName()));
             DefaultListModel<VirtualFile> model = new DefaultListModel<>();
             for (VirtualFile child : children) {
-                if (child.isDirectory()) {
-                    model.addElement(child);
-                }
+                if (child.isDirectory()) model.addElement(child);
             }
             historyList.setModel(model);
         }
