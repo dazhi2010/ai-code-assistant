@@ -39,8 +39,13 @@ public class ParseResponseAction extends AnAction implements DumbAware {
         if (success) {
             List<AiResponseAction> actions = promptManager.getParsedActions();
             assistantToolWindow.showChangesPreview(actions.stream().collect(Collectors.groupingBy(AiResponseAction::filePath)));
+            
+            String msg = (actions.isEmpty() && promptManager.getRequiredFiles().isEmpty() && promptManager.getRequiredClasses().isEmpty()) 
+                    ? "解析成功，已在右侧面板显示对话内容" 
+                    : "解析成功，请在右侧面板预览变更";
+            
             NotificationGroupManager.getInstance().getNotificationGroup(Constants.NOTIFICATION_GROUP_ID)
-                    .createNotification("JSON解析成功，请在右侧面板预览变更", NotificationType.INFORMATION).notify(project);
+                    .createNotification(msg, NotificationType.INFORMATION).notify(project);
         } else {
             assistantToolWindow.showJsonInputView();
             NotificationGroupManager.getInstance().getNotificationGroup(Constants.NOTIFICATION_GROUP_ID)

@@ -141,68 +141,29 @@ public final class DiffPresentationService {
         AiResponseAction createAction = actions.stream().filter(a -> "CREATE".equalsIgnoreCase(a.action())).findFirst().orElse(null);
         if (createAction != null) return createAction.content() != null ? createAction.content().replace("\r\n", "\n").replace("\r", "\n") : "";
 
-        String normalized = originalContent == null ? "" : originalContent.replace("\r\n", "\n").replace("\r", "\n");
-        StringBuilder current = new StringBuilder(normalized);
+        String currentStr = originalContent == null ? "" : originalContent;
+        ChangeApplierService applier = ChangeApplierService.getInstance(project);
 
         long deadline = System.nanoTime() + PREVIEW_TIME_BUDGET_MS * 1_000_000L; // 软超时，避免卡住
         for (AiResponseAction action : actions) {
             if (indicator != null) indicator.checkCanceled();
             if (System.nanoTime() > deadline) break; // 超时则中止，展示部分预览
 
-            String oldBlock = action.oldCodeBlock();
-            if (oldBlock == null || oldBlock.isEmpty()) continue;
-
-            Optional<BlockRange> opt = findUniqueBlockOffsetsStrict(current, oldBlock);
-            if (opt.isEmpty()) continue; // 预览中只做精确定位，失败则跳过（避免昂贵正则）
-            BlockRange range = opt.get();
-
             String type = action.action() != null ? action.action().toUpperCase() : "";
-            switch (type) {
-                case "UPDATE": {
-                    String newBlock = action.newCodeBlock() != null ? action.newCodeBlock().replace("\r\n", "\n").replace("\r", "\n") : "";
-                    current.replace(range.startOffset(), range.endOffset(), newBlock);
-                    break;
+            if ("UPDATE".equals(type) || "INSERT_AFTER".equals(type) || "DELETE".equals(type)) {
+                try {
+                    // 复用 ChangeApplierService 强大且一致的匹配逻辑
+                    currentStr = applier.applyChangeToContent(currentStr, action);
+                } catch (Exception e) {
+                    // 预览阶段如果某项匹配失败，忽略该项，继续展示其他已匹配的变更
                 }
-                case "INSERT_AFTER": {
-                    String newBlock = action.newCodeBlock() != null ? action.newCodeBlock().replace("\r\n", "\n").replace("\r", "\n") : "";
-                    current.insert(range.endOffset(), newBlock);
-                    break;
-                }
-                case "DELETE": {
-                    current.delete(range.startOffset(), range.endOffset());
-                    break;
-                }
-                default: // 忽略
             }
         }
-        return current.toString();
-    }
-
-    // 预览仅做精确匹配，避免高成本正则引发卡顿
-    private Optional<BlockRange> findUniqueBlockOffsetsStrict(CharSequence content, String blockToFind) {
-        if (content == null || blockToFind == null || blockToFind.isEmpty()) return Optional.empty();
-
-        int first;
-        int last;
-        if (content instanceof StringBuilder sb) {
-            first = sb.indexOf(blockToFind);
-            last = sb.lastIndexOf(blockToFind);
-        } else if (content instanceof String s) {
-            first = s.indexOf(blockToFind);
-            last = s.lastIndexOf(blockToFind);
-        } else {
-            String s = content.toString();
-            first = s.indexOf(blockToFind);
-            last = s.lastIndexOf(blockToFind);
-        }
-        if (first < 0) return Optional.empty();
-        if (first != last) return Optional.empty(); // 歧义
-        return Optional.of(new BlockRange(first, first + blockToFind.length()));
+        return currentStr;
     }
 
     private static boolean isTooBig(String s) { return s != null && s.length() > PREVIEW_MAX_CHARS; }
     private static int elapsedMs(long startNs) { return (int)((System.nanoTime() - startNs) / 1_000_000L); }
 
     private record DiffData(VirtualFile file, String originalContent) {}
-    private record BlockRange(int startOffset, int endOffset) {}
 }

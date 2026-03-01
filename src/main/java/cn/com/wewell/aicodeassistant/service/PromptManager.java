@@ -31,8 +31,8 @@ public final class PromptManager {
             3. **代码风格**：注释必须使用中文，新创建的文件需标注 `@author yuqf`。
             4. **唯一性定位**：在 `UPDATE` 操作中，`oldCodeBlock` 必须在目标文件中唯一存在。如有必要，请在前后包含若干行上下文（包括方法签名、特有的逻辑行等）以确保定位精准。
 
-            # RESPONSE PROTOCOL (JSON REQUIRED)
-            你必须返回一个符合以下结构的 JSON 对象。严禁包含任何 Markdown 格式块之外的自然语言解释。
+            # RESPONSE PROTOCOL
+            1. **代码修改或信息请求**：如果你的响应包含代码修改（actions）或需要请求更多文件/类信息（requires），你**必须**返回一个符合以下结构的 JSON 对象，并将其放置在 ```json ... ``` 代码块中。严禁在 JSON 代码块之外包含任何自然语言解释。
             {
               "thought": "对需求的深入分析、架构选择及实现思路的描述",
               "feedback": "如果你有非代码类的指导（如：安装特定插件、配置环境变量、修改 IDE 设置）或发现上下文不足需要补充，请在此说明",
@@ -52,6 +52,7 @@ public final class PromptManager {
                 "classes": ["若需更多类信息，列出全限定名"]
               }
             }
+            2. **普通对话**：如果你的响应仅为解答疑问、提供建议且**不涉及**代码修改或信息请求，请直接使用普通的 Markdown 文本进行回复，无需使用上述 JSON 结构。
 
             # NOTE
             - 优先使用 `UPDATE` 进行局部修改；仅在涉及大范围结构调整或新文件时使用 `CREATE/OVERWRITE`。
@@ -172,10 +173,17 @@ public final class PromptManager {
 
         if (outputContent == null || outputContent.isBlank()) return false;
 
+        String rawContent = outputContent.trim();
         try {
             // 剥离 Markdown 块标识
-            String jsonText = outputContent.trim();
-            if (jsonText.startsWith("```")) {
+            String jsonText = rawContent;
+            if (jsonText.contains("```json")) {
+                int start = jsonText.indexOf("```json") + 7;
+                int end = jsonText.indexOf("```", start);
+                if (end != -1) {
+                    jsonText = jsonText.substring(start, end).trim();
+                }
+            } else if (jsonText.startsWith("```")) {
                 int firstLineEnd = jsonText.indexOf('\n');
                 int lastBackticks = jsonText.lastIndexOf("```");
                 if (firstLineEnd != -1 && lastBackticks > firstLineEnd) {
@@ -183,7 +191,16 @@ public final class PromptManager {
                 }
             }
 
-            JsonElement root = JsonParser.parseString(jsonText);
+            // 尝试解析 JSON
+            JsonElement root;
+            try {
+                root = JsonParser.parseString(jsonText);
+            } catch (JsonSyntaxException e) {
+                // 如果解析失败且没有明显的 JSON 块，则视为普通文本
+                aiFeedback = rawContent;
+                return true;
+            }
+
             Gson gson = new Gson();
 
             if (root.isJsonArray()) {
@@ -239,13 +256,10 @@ public final class PromptManager {
                 }
                 
                 normalizeRequires();
-                
-                // 约定：若有请求信息且无行动，则不视为解析失败
-                if ((!requiredFiles.isEmpty() || !requiredClasses.isEmpty()) && (parsedActions == null || parsedActions.isEmpty())) {
-                    return true;
-                }
             } else {
-                return false;
+                // 非对象或数组也视为普通文本
+                aiFeedback = rawContent;
+                return true;
             }
 
             // 基础校验
@@ -255,9 +269,12 @@ public final class PromptManager {
 
             return true;
         } catch (Exception e) {
-            return false;
+            // 解析过程中的任何异常都让它回退到普通文本显示
+            aiFeedback = rawContent;
+            return true;
         }
     }
+
 
     /**
      * 更新 Action 的内容（当用户在 Diff 窗口手动编辑后调用）

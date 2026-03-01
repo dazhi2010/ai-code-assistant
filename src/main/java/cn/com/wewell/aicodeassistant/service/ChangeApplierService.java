@@ -28,6 +28,12 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+/**
+ * 负责将 AI 建议的变更应用到项目文件的核心服务。
+ * 完美还原了 CodeBlockMatcherTest 的逻辑：基于 Token 的灵活匹配、前后空白保留、智能缩进平移与动态相似度兜底。
+ *
+ * @author yuqf
+ */
 @Service(Service.Level.PROJECT)
 public final class ChangeApplierService {
 
@@ -42,385 +48,405 @@ public final class ChangeApplierService {
     }
 
     public void applyChanges(List<AiResponseAction> actions) {
+        if (actions == null || actions.isEmpty()) return;
+
         Map<String, List<AiResponseAction>> groupedActions = actions.stream()
                 .collect(Collectors.groupingBy(AiResponseAction::filePath));
 
-        CommandProcessor.getInstance().executeCommand(project, () -> {
-            for (Map.Entry<String, List<AiResponseAction>> entry : groupedActions.entrySet()) {
-                List<AiResponseAction> fileActions = entry.getValue();
-
-                // 优先处理 OVERWRITE，因为它会覆盖所有其他变更
-                Optional<AiResponseAction> overwriteAction = fileActions.stream()
-                        .filter(a -> "OVERWRITE".equalsIgnoreCase(a.action()))
-                        .findFirst();
-
-                if (overwriteAction.isPresent()) {
-                    applyOverwrite(overwriteAction.get());
-                    continue;
-                }
-
-                // 对于同一个文件的多个操作，按顺序执行
-                // 注意：如果操作之间存在重叠，AI响应的顺序至关重要。
-                // 理论上，更安全的做法是每次修改后都重新加载内容，但会牺牲性能。
-                // 当前假设AI提供的操作是按逻辑顺序排列的。
-                for (AiResponseAction action : fileActions) {
-                    applyActionByContent(action);
-                }
-            }
-            notifySuccess("已成功应用 " + actions.size() + " 个变更。");
-        }, "Apply AI Assistant Changes", null);
-    }
-
-    private void applyActionByContent(AiResponseAction action) {
-        try {
-            switch (action.action().toUpperCase()) {
-                case "CREATE" -> applyCreate(action);
-                case "OVERWRITE" -> applyOverwrite(action); // 已经预先处理，但保留以防万一
-                case "UPDATE" -> applyUpdateByContent(action);
-                case "INSERT_AFTER" -> applyInsertAfterByContent(action);
-                case "DELETE" -> applyDeleteByContent(action);
-                default -> notifyWarning("未知的操作类型: " + action.action());
-            }
-        } catch (IOException e) {
-            notifyError("应用变更失败 '" + action.action() + "' on " + action.filePath() + ": " + e.getMessage());
-        }
-    }
-
-    private void applyCreate(AiResponseAction action) throws IOException {
         WriteCommandAction.runWriteCommandAction(project, () -> {
-            String projectBasePath = project.getBasePath();
-            if (projectBasePath == null) return;
+            CommandProcessor.getInstance().executeCommand(project, () -> {
+                for (Map.Entry<String, List<AiResponseAction>> entry : groupedActions.entrySet()) {
+                    String filePath = entry.getKey();
+                    List<AiResponseAction> fileActions = entry.getValue();
 
-            String correctedRelativePath = action.filePath().replace('/', File.separatorChar);
-            File targetFile = new File(projectBasePath, correctedRelativePath);
-            File parentDir = targetFile.getParentFile();
-            if (parentDir == null) return;
+                    // 优先处理 OVERWRITE
+                    Optional<AiResponseAction> overwriteAction = fileActions.stream()
+                            .filter(a -> "OVERWRITE".equalsIgnoreCase(a.action()))
+                            .findFirst();
 
-            try {
-                VirtualFile parentVirtualDir = VfsUtil.createDirectories(parentDir.getAbsolutePath());
-                if (parentVirtualDir == null) {
-                    throw new IOException("无法创建目录: " + parentDir.getAbsolutePath());
-                }
-
-                VirtualFile newFile = parentVirtualDir.findChild(targetFile.getName());
-                if (newFile == null) {
-                    newFile = parentVirtualDir.createChildData(this, targetFile.getName());
-                }
-                
-                String content = action.content();
-                if (content == null || content.isBlank()) {
-                    content = action.newCodeBlock();
-                }
-                
-                if (content != null) {
-                    newFile.setBinaryContent(content.getBytes());
-                    formatFile(newFile);
-                } else {
-                    notifyWarning("创建文件 " + action.filePath() + " 失败：没有提供内容 (content 或 newCodeBlock 为空)");
-                }
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
-        });
-    }
-
-    private void applyOverwrite(AiResponseAction action) {
-        WriteCommandAction.runWriteCommandAction(project, () -> {
-            Document document = getDocument(action.filePath());
-            if (document == null) {
-                // 如果文件不存在，则尝试创建它
-                try {
-                    applyCreate(action);
-                } catch (IOException e) {
-                    notifyError("文件不存在，创建失败: " + action.filePath());
-                }
-                return;
-            }
-            document.replaceString(0, document.getTextLength(), action.content());
-            FileDocumentManager.getInstance().saveDocument(document);
-            formatFile(FileDocumentManager.getInstance().getFile(document));
-        });
-    }
-
-    private void applyUpdateByContent(AiResponseAction action) {
-        WriteCommandAction.runWriteCommandAction(project, () -> {
-            Document document = getDocumentForModification(action.filePath());
-            if (document == null) return;
-
-            findUniqueBlock(document.getText(), action.oldCodeBlock(), action.filePath()).ifPresent(range -> {
-                String newText = Objects.requireNonNullElse(action.newCodeBlock(), "");
-                newText = newText.replace("\r\n", "\n");
-                document.replaceString(range.startOffset(), range.endOffset(), newText);
-                FileDocumentManager.getInstance().saveDocument(document);
-            });
-        });
-    }
-
-    private void applyInsertAfterByContent(AiResponseAction action) {
-        WriteCommandAction.runWriteCommandAction(project, () -> {
-            Document document = getDocumentForModification(action.filePath());
-            if (document == null) return;
-
-            findUniqueBlock(document.getText(), action.oldCodeBlock(), action.filePath()).ifPresent(range -> {
-                String newText = Objects.requireNonNullElse(action.newCodeBlock(), "");
-                newText = newText.replace("\r\n", "\n");
-                document.insertString(range.endOffset(), newText);
-                FileDocumentManager.getInstance().saveDocument(document);
-            });
-        });
-    }
-
-    private void applyDeleteByContent(AiResponseAction action) throws IOException {
-        // oldCodeBlock 为空 => 删除整个文件
-        if (action.oldCodeBlock() == null || action.oldCodeBlock().isEmpty()) {
-            WriteCommandAction.runWriteCommandAction(project, () -> {
-                VirtualFile file = findVirtualFile(action.filePath());
-                if (file != null && file.exists()) {
-                    try {
-                        file.delete(this);
-                        notifySuccess("文件已删除: " + action.filePath());
-                    } catch (IOException e) {
-                        throw new RuntimeException(e);
+                    if (overwriteAction.isPresent()) {
+                        applyOverwriteDirectly(overwriteAction.get());
+                        continue;
                     }
-                } else {
-                    notifyWarning("尝试删除但文件未找到: " + action.filePath());
+
+                    // 批量应用变更
+                    for (AiResponseAction action : fileActions) {
+                        try {
+                            applyActionWithoutFormatting(action);
+                        } catch (Exception e) {
+                            notifyError("应用变更失败 [" + action.action() + "] -> " + action.filePath() + ": " + e.getMessage());
+                        }
+                    }
+
+                    // 格式化处理（由于缩进已智能调整，有时可以不用强行全局格式化，但为了兜底仍保留）
+                    VirtualFile vf = findVirtualFile(filePath);
+                    if (vf != null) {
+                        formatFileDirectly(vf);
+                    }
                 }
-            });
+                notifySuccess("已成功应用 " + actions.size() + " 个变更。");
+            }, "Apply AI Assistant Changes", null);
+        });
+    }
+
+    private void applyActionWithoutFormatting(AiResponseAction action) throws IOException {
+        String actionType = action.action().toUpperCase();
+
+        if ("CREATE".equals(actionType)) {
+            applyCreateWithoutFormatting(action);
             return;
         }
 
-        // 否则，删除文件中的代码块；找不到时做“整文件等价”兜底
-        WriteCommandAction.runWriteCommandAction(project, () -> {
-            Document document = getDocumentForModification(action.filePath());
-            if (document == null) return;
+        if ("DELETE".equals(actionType) && (action.oldCodeBlock() == null || action.oldCodeBlock().isEmpty())) {
+            VirtualFile file = findVirtualFile(action.filePath());
+            if (file != null && file.exists()) file.delete(this);
+            return;
+        }
 
-            String fileText = document.getText();
-            Optional<BlockRange> range = findUniqueBlock(fileText, action.oldCodeBlock(), action.filePath());
-            if (range.isPresent()) {
-                document.deleteString(range.get().startOffset(), range.get().endOffset());
-                FileDocumentManager.getInstance().saveDocument(document);
-                return;
-            }
+        Document document = getDocumentForModification(action.filePath());
+        if (document == null) return;
 
-            // 兜底：若 oldCodeBlock 与整文件在“宽松规范化后”完全一致，按“删除整个文件”处理
-            if (contentEquivalentForDeletion(fileText, action.oldCodeBlock())) {
-                VirtualFile file = findVirtualFile(action.filePath());
-                if (file != null && file.exists()) {
-                    try {
-                        file.delete(this);
-                        notifySuccess("文件已删除: " + action.filePath() + "（宽松等价匹配）");
-                    } catch (IOException e) {
-                        throw new RuntimeException(e);
-                    }
-                } else {
-                    notifyWarning("尝试删除但文件未找到: " + action.filePath());
-                }
-            }
-        });
+        String oldContent = document.getText();
+        String newContent = applyChangeToContent(oldContent, action);
+
+        if (!oldContent.equals(newContent)) {
+            document.setText(newContent);
+        }
     }
 
-    private boolean contentEquivalentForDeletion(String fileText, String blockText) {
-        return normalizeForCompare(fileText).equals(normalizeForCompare(blockText));
+    private void applyCreateWithoutFormatting(AiResponseAction action) throws IOException {
+        String projectBasePath = project.getBasePath();
+        if (projectBasePath == null) return;
+
+        String correctedRelativePath = action.filePath().replace('/', File.separatorChar);
+        File targetFile = new File(projectBasePath, correctedRelativePath);
+        File parentDir = targetFile.getParentFile();
+        if (parentDir == null) return;
+
+        VirtualFile parentVirtualDir = VfsUtil.createDirectories(parentDir.getAbsolutePath());
+        if (parentVirtualDir == null) throw new IOException("无法创建目录: " + parentDir.getAbsolutePath());
+
+        VirtualFile newFile = parentVirtualDir.findChild(targetFile.getName());
+        if (newFile == null) {
+            newFile = parentVirtualDir.createChildData(this, targetFile.getName());
+        }
+
+        String content = Objects.requireNonNullElse(action.content(), action.newCodeBlock());
+        if (content != null) {
+            newFile.setBinaryContent(content.getBytes());
+        }
     }
 
-    // 规范化：统一换行；去掉每行行首空白与 Javadoc 边界星号；去掉所有空格/Tab
-    private String normalizeForCompare(String s) {
-        if (s == null) return "";
-        s = s.replace("\r\n", "\n").replace("\r", "\n");
-        StringBuilder sb = new StringBuilder(s.length());
-        int i = 0, len = s.length();
-        while (i < len) {
-            int j = s.indexOf('\n', i);
-            if (j == -1) j = len;
-            String line = s.substring(i, j);
-            // 去掉行首空白与若存在的 Javadoc 星号
-            line = line.replaceFirst("^\\s*\\*?\\s*", "");
-            // 去掉所有空格/Tab
-            line = line.replaceAll("[ \\t]+", "");
-            sb.append(line);
-            if (j < len) sb.append('\n');
-            i = j + 1;
+    private void applyOverwriteDirectly(AiResponseAction action) {
+        Document document = getDocument(action.filePath());
+        if (document == null) {
+            try {
+                applyCreateWithoutFormatting(action);
+                VirtualFile vf = findVirtualFile(action.filePath());
+                if (vf != null) formatFileDirectly(vf);
+            } catch (IOException e) {
+                notifyError("文件不存在且创建失败: " + action.filePath());
+            }
+            return;
+        }
+        document.setText(Objects.requireNonNullElse(action.content(), ""));
+        FileDocumentManager.getInstance().saveDocument(document);
+        VirtualFile vf = FileDocumentManager.getInstance().getFile(document);
+        if (vf != null) formatFileDirectly(vf);
+    }
+
+    /**
+     * 将单个变更应用于文本内容，核心使用 CodeBlockMatcherTest 的逻辑。
+     * 公开此方法，确保 Diff 预览与实际应用的匹配逻辑完全一致。
+     */
+    public String applyChangeToContent(String targetCode, AiResponseAction action) {
+        String actionType = action.action().toUpperCase();
+        String oldCodeBlock = action.oldCodeBlock();
+        String newCodeBlock = action.newCodeBlock() != null ? action.newCodeBlock() : "";
+
+        if (oldCodeBlock == null || oldCodeBlock.trim().isEmpty()) {
+            return targetCode;
+        }
+
+        // 统一换行符
+        targetCode = targetCode.replace("\r\n", "\n").replace("\r", "\n");
+        oldCodeBlock = oldCodeBlock.replace("\r\n", "\n").replace("\r", "\n");
+        newCodeBlock = newCodeBlock.replace("\r\n", "\n").replace("\r", "\n");
+
+        // 步骤1: 构建灵活正则表达式
+        String regexPattern = buildFlexibleRegex(oldCodeBlock);
+        Pattern pattern = Pattern.compile(regexPattern, Pattern.DOTALL);
+        Matcher matcher = pattern.matcher(targetCode);
+
+        int startPos = -1;
+        int endPos = -1;
+        String matchedContent = null;
+
+        if (matcher.find()) {
+            startPos = matcher.start();
+            endPos = matcher.end();
+            matchedContent = matcher.group();
+            
+            // 确保没有歧义
+            if (matcher.find()) {
+                startPos = -1; // 有多个匹配，回退到备用策略
+            }
+        }
+
+        if (startPos >= 0) {
+            return applyToExactPosition(targetCode, startPos, endPos, matchedContent, newCodeBlock, actionType);
+        } else {
+            // 步骤2: 备用策略，基于相似度
+            return tryAlternativeMatch(targetCode, oldCodeBlock, newCodeBlock, actionType);
+        }
+    }
+
+    private String buildFlexibleRegex(String oldCodeBlock) {
+        String normalized = oldCodeBlock.replaceAll("\\s+/>", "/>");
+        String[] tokens = normalized.trim().split("\\s+");
+        StringBuilder regex = new StringBuilder();
+
+        for (int i = 0; i < tokens.length; i++) {
+            if (tokens[i].isEmpty()) continue;
+            if (i > 0) regex.append("\\s+");
+
+            String token = tokens[i];
+            if (token.endsWith("/>")) {
+                String prefix = token.substring(0, token.length() - 2);
+                regex.append(escapeTokenForRegex(prefix)).append("\\s*/").append(">");
+            } else {
+                regex.append(escapeTokenForRegex(token));
+            }
+        }
+        return regex.toString();
+    }
+
+    private String escapeTokenForRegex(String token) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < token.length(); i++) {
+            char c = token.charAt(i);
+            if (c == '"' || c == '\'') {
+                sb.append("[\"']");
+            } else if ("<>()[]{}\\^$|?*+.".indexOf(c) != -1) {
+                sb.append("\\").append(c);
+            } else {
+                sb.append(c);
+            }
         }
         return sb.toString();
     }
 
-    private Optional<BlockRange> findUniqueBlock(String content, String blockToFind, String filePath) {
-        if (blockToFind == null || blockToFind.isEmpty()) {
-            notifyWarning("操作被跳过：代码块为空 on " + filePath);
-            return Optional.empty();
-        }
-        // 统一换行，避免 CRLF/LF 差异
-        String c = content.replace("\r\n", "\n").replace("\r", "\n");
-        String b = blockToFind.replace("\r\n", "\n").replace("\r", "\n");
-
-        // 1) 完全匹配（唯一）
-        int first = c.indexOf(b);
-        if (first >= 0) {
-            int last = c.lastIndexOf(b);
-            if (first != last) {
-                notifyError("应用变更失败：在 " + filePath + " 中找到多个相同的代码块，存在歧义。");
-                return Optional.empty();
-            }
-            return Optional.of(new BlockRange(first, first + b.length()));
+    private String applyToExactPosition(String targetCode, int startPos, int endPos, String matchedContent, String newCodeBlock, String actionType) {
+        if ("DELETE".equals(actionType)) {
+            return targetCode.substring(0, startPos) + targetCode.substring(endPos);
         }
 
-        // 2) 修复 JSON/转义差异：把字符串字面量内的实际控制字符重新编码为 \\n/\\t 等，再尝试完全匹配
-        String bFixed = reencodeEscapesInsideQuotes(b);
-        if (!bFixed.equals(b)) {
-            int f2 = c.indexOf(bFixed);
-            if (f2 >= 0) {
-                int l2 = c.lastIndexOf(bFixed);
-                if (f2 != l2) {
-                    notifyError("应用变更失败：在 " + filePath + " 中找到多个相同的代码块（转义修复后），存在歧义。");
-                    return Optional.empty();
-                }
-                return Optional.of(new BlockRange(f2, f2 + bFixed.length()));
-            }
+        String indent = detectIndent(matchedContent);
+        String adjustedNewCode = adjustIndent(newCodeBlock, indent);
+
+        if ("INSERT_AFTER".equals(actionType)) {
+            if (!adjustedNewCode.startsWith("\n")) adjustedNewCode = "\n" + adjustedNewCode;
+            return targetCode.substring(0, endPos) + adjustedNewCode + targetCode.substring(endPos);
         }
 
-        // 3) 宽松匹配（忽略空白/换行、Javadoc 行首星号差异），保持唯一
-        Pattern loose = buildLooseBlockPattern(b);
-        Matcher m = loose.matcher(c);
-        if (!m.find()) {
-            if (!bFixed.equals(b)) {
-                Pattern looseFixed = buildLooseBlockPattern(bFixed);
-                Matcher m2 = looseFixed.matcher(c);
-                if (m2.find()) {
-                    int s2 = m2.start(), e2 = m2.end();
-                    if (m2.find()) {
-                        notifyError("应用变更失败：在 " + filePath + " 中找到多个疑似匹配的代码块（宽松匹配，转义修复后），存在歧义。");
-                        return Optional.empty();
-                    }
-                    return Optional.of(new BlockRange(s2, e2));
-                }
-            }
-            notifyError("应用变更失败：在 " + filePath + " 中找不到指定的代码块（已尝试转义修复与宽松匹配）。");
-            return Optional.empty();
-        }
-        int start = m.start();
-        int end = m.end();
-        if (m.find()) {
-            notifyError("应用变更失败：在 " + filePath + " 中找到多个疑似匹配的代码块（宽松匹配），存在歧义。");
-            return Optional.empty();
-        }
-        return Optional.of(new BlockRange(start, end));
-    }
+        // UPDATE 处理前后空白保留
+        String leadingWhitespace = "";
+        String trailingWhitespace = "";
 
-    private Pattern buildLooseBlockPattern(String block) {
-        StringBuilder rx = new StringBuilder(block.length() * 2);
-        boolean lineStart = true;
-
-        for (int i = 0; i < block.length();) {
-            char c = block.charAt(i);
-
-            // 忽略 CR
-            if (c == '\r') { i++; continue; }
-
-            // 换行：兼容 CRLF/LF，并允许行首有/无 Javadoc 星号与空白
-            if (c == '\n') {
-                rx.append("(?:\\r?\\n)"); // 换行
-                // 行首：可选缩进 + 可选一个或多个星号 + 可选空白
-                rx.append("[ \\t]*(?:\\*+\\s*)?");
-                lineStart = true;
-                i++;
-                continue;
-            }
-
-            // 处理块起始行（第一行也视作行首）
-            if (lineStart) {
-                // 容忍开头缩进 + 0..N 星号差异
-                rx.append("[ \\t]*(?:\\*+\\s*)?");
-                // 消耗 block 中行首的空白和星号，避免重复匹配
-                while (i < block.length()) {
-                    char d = block.charAt(i);
-                    if (d == ' ' || d == '\t' || d == '*') { i++; } else break;
-                }
-                lineStart = false;
-                continue;
-            }
-
-            // 统一 "/**" 与 "/*"
-            if (c == '/' && i + 1 < block.length() && block.charAt(i + 1) == '*') {
-                // 允许 1 或 2 个星
-                rx.append("/\\*{1,2}");
-                i += 2; // 跳过 "/*"
-                // 若 old 块是 "/**" 则再跳过一个星
-                if (i < block.length() && block.charAt(i) == '*') i++;
-                continue;
-            }
-
-            // 统一 "*/" 与 "**/"
-            if (c == '*' && i + 1 < block.length() && block.charAt(i + 1) == '/') {
-                rx.append("\\*+/"); // 至少一个星再跟斜杠
-                i += 2;
-                continue;
-            }
-
-            // 折叠空白
-            if (c == ' ' || c == '\t') {
-                rx.append("[ \\t]+");
-                while (i < block.length() && (block.charAt(i) == ' ' || block.charAt(i) == '\t')) i++;
-                continue;
-            }
-
-            // 其他字符按字面匹配
-            rx.append(Pattern.quote(String.valueOf(c)));
-            i++;
-        }
-
-        return Pattern.compile(rx.toString(), Pattern.MULTILINE);
-    }
-    /**
-     * 将字符串字面量中的实际控制字符（\n/\r/\t/\f/\b）重新编码为转义序列（\\n/\\r/\\t/\\f/\\b），仅在成对双引号内生效。
-     * 解决 JSON oldCodeBlock 写成 "\\n" 与源码中的 "\\\n"（文本中的反斜杠+n）不一致导致的匹配失败。
-     */
-    private String reencodeEscapesInsideQuotes(String s) {
-        if (s == null || s.isEmpty()) return s;
-        StringBuilder out = new StringBuilder(s.length() * 2);
-        boolean inStr = false;
-        boolean escaped = false;
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (inStr) {
-                if (escaped) { // 保留已存在的转义，如 \" 或 \\
-                    out.append('\\').append(c);
-                    escaped = false;
-                    continue;
-                }
-                if (c == '\\') { // 下一个字符将被转义
-                    escaped = true;
-                    continue;
-                }
-                if (c == '"') { // 结束引号
-                    inStr = false;
-                    out.append(c);
-                    continue;
-                }
-                // 把字符串内的控制字符重新编码
-                switch (c) {
-                    case '\n': out.append("\\n"); break;
-                    case '\r': out.append("\\r"); break;
-                    case '\t': out.append("\\t"); break;
-                    case '\f': out.append("\\f"); break;
-                    case '\b': out.append("\\b"); break;
-                    default: out.append(c);
-                }
+        for (int i = 0; i < matchedContent.length(); i++) {
+            char c = matchedContent.charAt(i);
+            if (c == '\n' || c == '\r') {
+                leadingWhitespace += c;
+            } else if (Character.isWhitespace(c) && leadingWhitespace.contains("\n")) {
+                break;
+            } else if (Character.isWhitespace(c)) {
+                leadingWhitespace += c;
             } else {
-                if (c == '"') inStr = true;
-                out.append(c);
+                break;
             }
         }
-        if (escaped) out.append('\\'); // 处理结尾悬空的反斜杠
-        return out.toString();
+
+        for (int i = matchedContent.length() - 1; i >= 0; i--) {
+            char c = matchedContent.charAt(i);
+            if (c == '\n' || c == '\r' || Character.isWhitespace(c)) {
+                trailingWhitespace = c + trailingWhitespace;
+            } else {
+                break;
+            }
+        }
+
+        String finalNewCode = leadingWhitespace + adjustedNewCode + trailingWhitespace;
+        return targetCode.substring(0, startPos) + finalNewCode + targetCode.substring(endPos);
+    }
+
+    private String tryAlternativeMatch(String targetCode, String oldCodeBlock, String newCodeBlock, String actionType) {
+        String normalizedOld = normalizeForMatching(oldCodeBlock);
+
+        String[] targetLines = targetCode.split("\n", -1);
+        String[] oldLines = oldCodeBlock.split("\n");
+
+        int oldNonEmptyLines = 0;
+        for (String line : oldLines) {
+            if (!line.trim().isEmpty()) oldNonEmptyLines++;
+        }
+
+        int startLine = -1;
+        int endLine = -1;
+        double bestSimilarity = 0.0;
+
+        for (int i = 0; i < targetLines.length; i++) {
+            for (int j = i + Math.max(0, oldNonEmptyLines - 3); j < Math.min(targetLines.length, i + oldNonEmptyLines + 5); j++) {
+                StringBuilder window = new StringBuilder();
+                for (int k = i; k <= j; k++) {
+                    window.append(targetLines[k]).append("\n");
+                }
+
+                String normalizedWindow = normalizeForMatching(window.toString());
+                
+                int maxLen = Math.max(normalizedOld.length(), normalizedWindow.length());
+                if (maxLen == 0) continue;
+                int lenDiff = Math.abs(normalizedOld.length() - normalizedWindow.length());
+                if (1.0 - (double) lenDiff / maxLen <= bestSimilarity) {
+                    continue;
+                }
+
+                double similarity = calculateSimilarity(normalizedOld, normalizedWindow);
+
+                if (similarity > bestSimilarity) {
+                    bestSimilarity = similarity;
+                    startLine = i;
+                    endLine = j;
+                }
+            }
+        }
+
+        if (bestSimilarity < 0.8 || startLine < 0) {
+            throw new RuntimeException("正则与相似度匹配均失败。最高相似度仅为: " + String.format("%.2f%%", bestSimilarity * 100));
+        }
+
+        if ("DELETE".equals(actionType)) {
+            StringBuilder result = new StringBuilder();
+            for (int i = 0; i < startLine; i++) result.append(targetLines[i]).append("\n");
+            for (int i = endLine + 1; i < targetLines.length; i++) {
+                result.append(targetLines[i]);
+                if (i < targetLines.length - 1) result.append("\n");
+            }
+            return result.toString();
+        }
+
+        String indent = detectIndent(targetLines[startLine]);
+        String adjustedNewCode = adjustIndent(newCodeBlock, indent);
+
+        if ("INSERT_AFTER".equals(actionType)) {
+            StringBuilder result = new StringBuilder();
+            for (int i = 0; i <= endLine; i++) result.append(targetLines[i]).append("\n");
+            result.append(adjustedNewCode).append("\n");
+            for (int i = endLine + 1; i < targetLines.length; i++) {
+                result.append(targetLines[i]);
+                if (i < targetLines.length - 1) result.append("\n");
+            }
+            return result.toString();
+        }
+
+        // UPDATE
+        StringBuilder result = new StringBuilder();
+        for (int i = 0; i < startLine; i++) result.append(targetLines[i]).append("\n");
+        result.append(adjustedNewCode);
+        if (endLine + 1 < targetLines.length) result.append("\n");
+        for (int i = endLine + 1; i < targetLines.length; i++) {
+            result.append(targetLines[i]);
+            if (i < targetLines.length - 1) result.append("\n");
+        }
+
+        return result.toString();
+    }
+
+    private String normalizeForMatching(String code) {
+        return code.replaceAll("\\s+", " ")
+                   .replace('"', '\'')
+                   .replace("/>", " />")
+                   .replaceAll("\\s+/>", " />")
+                   .trim();
+    }
+
+    private double calculateSimilarity(String s1, String s2) {
+        int maxLen = Math.max(s1.length(), s2.length());
+        if (maxLen == 0) return 1.0;
+        int distance = levenshteinDistance(s1, s2);
+        return 1.0 - (double) distance / maxLen;
+    }
+
+    private int levenshteinDistance(String s1, String s2) {
+        int[][] dp = new int[s1.length() + 1][s2.length() + 1];
+        for (int i = 0; i <= s1.length(); i++) dp[i][0] = i;
+        for (int j = 0; j <= s2.length(); j++) dp[0][j] = j;
+
+        for (int i = 1; i <= s1.length(); i++) {
+            for (int j = 1; j <= s2.length(); j++) {
+                int cost = s1.charAt(i - 1) == s2.charAt(j - 1) ? 0 : 1;
+                dp[i][j] = Math.min(
+                        Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1),
+                        dp[i - 1][j - 1] + cost
+                );
+            }
+        }
+        return dp[s1.length()][s2.length()];
+    }
+
+    private String detectIndent(String code) {
+        String[] lines = code.split("\n");
+        for (String line : lines) {
+            if (!line.trim().isEmpty()) {
+                int count = 0;
+                for (char c : line.toCharArray()) {
+                    if (c == ' ') count++;
+                    else break;
+                }
+                return " ".repeat(count);
+            }
+        }
+        return "";
+    }
+
+    private String adjustIndent(String code, String targetIndent) {
+        String[] lines = code.split("\n", -1);
+        int minIndent = Integer.MAX_VALUE;
+        for (String line : lines) {
+            if (!line.trim().isEmpty()) {
+                int spaces = 0;
+                for (char c : line.toCharArray()) {
+                    if (c == ' ') spaces++;
+                    else if (c == '\t') spaces += 4;
+                    else break;
+                }
+                minIndent = Math.min(minIndent, spaces);
+            }
+        }
+        if (minIndent == Integer.MAX_VALUE) minIndent = 0;
+
+        StringBuilder result = new StringBuilder();
+        for (int i = 0; i < lines.length; i++) {
+            if (i > 0) result.append("\n");
+            String line = lines[i];
+            if (line.trim().isEmpty()) {
+                result.append("");
+            } else {
+                int currentIndent = 0;
+                for (char c : line.toCharArray()) {
+                    if (c == ' ') currentIndent++;
+                    else if (c == '\t') currentIndent += 4;
+                    else break;
+                }
+                int relativeIndent = Math.max(0, currentIndent - minIndent);
+                result.append(targetIndent).append(" ".repeat(relativeIndent)).append(line.trim());
+            }
+        }
+        return result.toString();
     }
 
     private Document getDocumentForModification(String relativePath) {
         Document document = getDocument(relativePath);
-        if (document == null) {
-            notifyWarning("文件未找到，无法应用变更: " + relativePath);
-            return null;
-        }
-        // 确保 Document 和 PSI 状态同步
+        if (document == null) return null;
         PsiDocumentManager pdm = PsiDocumentManager.getInstance(project);
         pdm.doPostponedOperationsAndUnblockDocument(document);
         pdm.commitDocument(document);
@@ -428,32 +454,24 @@ public final class ChangeApplierService {
     }
 
     public VirtualFile findVirtualFile(String relativePath) {
-        String projectBasePath = project.getBasePath();
-        if (projectBasePath == null) return null;
-
-        String fullPath = new File(projectBasePath, relativePath.replace('/', File.separatorChar)).getAbsolutePath();
+        String projectBase = project.getBasePath();
+        if (projectBase == null) return null;
+        String fullPath = new File(projectBase, relativePath.replace('/', File.separatorChar)).getAbsolutePath();
         return LocalFileSystem.getInstance().refreshAndFindFileByPath(fullPath);
     }
 
     private Document getDocument(String relativePath) {
         VirtualFile file = findVirtualFile(relativePath);
-        if (file == null) {
-            return null;
-        }
+        if (file == null) return null;
         return FileDocumentManager.getInstance().getDocument(file);
     }
 
-    private void formatFile(VirtualFile file) {
-        if (file == null) return;
+    private void formatFileDirectly(VirtualFile file) {
         PsiFile psiFile = PsiManager.getInstance(project).findFile(file);
         if (psiFile != null) {
-            WriteCommandAction.runWriteCommandAction(project, () -> {
-                CodeStyleManager.getInstance(project).reformat(psiFile);
-                Document doc = FileDocumentManager.getInstance().getDocument(file);
-                if (doc != null) {
-                    FileDocumentManager.getInstance().saveDocument(doc);
-                }
-            });
+            CodeStyleManager.getInstance(project).reformat(psiFile);
+            Document doc = FileDocumentManager.getInstance().getDocument(file);
+            if (doc != null) FileDocumentManager.getInstance().saveDocument(doc);
         }
     }
 
@@ -471,6 +489,4 @@ public final class ChangeApplierService {
         NotificationGroupManager.getInstance().getNotificationGroup(Constants.NOTIFICATION_GROUP_ID)
                 .createNotification(message, NotificationType.ERROR).notify(project);
     }
-
-    private record BlockRange(int startOffset, int endOffset) {}
 }
