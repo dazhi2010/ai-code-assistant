@@ -230,19 +230,12 @@ public final class PromptManager {
                 if (actionsKey != null && obj.get(actionsKey).isJsonArray()) {
                     Type listType = new TypeToken<List<AiResponseAction>>(){}.getType();
                     parsedActions = gson.fromJson(obj.get(actionsKey), listType);
-                    
-                    // 填充 CREATE/OVERWRITE 的 content 字段
-                    if (parsedActions != null) {
-                        ChangeApplierService applier = ChangeApplierService.getInstance(project);
-                        for (AiResponseAction action : parsedActions) {
-                            if (("CREATE".equalsIgnoreCase(action.action()) || "OVERWRITE".equalsIgnoreCase(action.action()))
-                                    && (action.content() == null || action.content().isBlank())
-                                    && action.newCodeBlock() != null) {
-                                action.setContent(action.newCodeBlock());
-                            }
-                            // 初始化匹配状态
-                            action.setMatched(applier.checkMatchStatus(action));
-                        }
+                } else if (obj.has("action") && obj.has("filePath")) {
+                    // 容错处理：如果直接返回了单个 Action 对象
+                    AiResponseAction singleAction = gson.fromJson(obj, AiResponseAction.class);
+                    if (singleAction != null) {
+                        parsedActions = new ArrayList<>();
+                        parsedActions.add(singleAction);
                     }
                 }
 
@@ -271,9 +264,21 @@ public final class PromptManager {
                 return true;
             }
 
-            // 基础校验
+            // 基础校验与状态初始化
             if (parsedActions != null && !parsedActions.isEmpty()) {
                 parsedActions.removeIf(a -> a.action() == null || a.filePath() == null);
+                
+                ChangeApplierService applier = ChangeApplierService.getInstance(project);
+                for (AiResponseAction action : parsedActions) {
+                    // 填充 CREATE/OVERWRITE 的 content 字段
+                    if (("CREATE".equalsIgnoreCase(action.action()) || "OVERWRITE".equalsIgnoreCase(action.action()))
+                            && (action.content() == null || action.content().isBlank())
+                            && action.newCodeBlock() != null) {
+                        action.setContent(action.newCodeBlock());
+                    }
+                    // 初始化匹配状态
+                    action.setMatched(applier.checkMatchStatus(action));
+                }
             }
 
             return true;

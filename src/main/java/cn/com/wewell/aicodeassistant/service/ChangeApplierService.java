@@ -53,39 +53,37 @@ public final class ChangeApplierService {
         Map<String, List<AiResponseAction>> groupedActions = actions.stream()
                 .collect(Collectors.groupingBy(AiResponseAction::filePath));
 
-        WriteCommandAction.runWriteCommandAction(project, () -> {
-            CommandProcessor.getInstance().executeCommand(project, () -> {
-                for (Map.Entry<String, List<AiResponseAction>> entry : groupedActions.entrySet()) {
-                    String filePath = entry.getKey();
-                    List<AiResponseAction> fileActions = entry.getValue();
+        WriteCommandAction.runWriteCommandAction(project, "Apply AI Assistant Changes", null, () -> {
+            for (Map.Entry<String, List<AiResponseAction>> entry : groupedActions.entrySet()) {
+                String filePath = entry.getKey();
+                List<AiResponseAction> fileActions = entry.getValue();
 
-                    // 优先处理 OVERWRITE
-                    Optional<AiResponseAction> overwriteAction = fileActions.stream()
-                            .filter(a -> "OVERWRITE".equalsIgnoreCase(a.action()))
-                            .findFirst();
+                // 优先处理 OVERWRITE
+                Optional<AiResponseAction> overwriteAction = fileActions.stream()
+                        .filter(a -> "OVERWRITE".equalsIgnoreCase(a.action()))
+                        .findFirst();
 
-                    if (overwriteAction.isPresent()) {
-                        applyOverwriteDirectly(overwriteAction.get());
-                        continue;
-                    }
+                if (overwriteAction.isPresent()) {
+                    applyOverwriteDirectly(overwriteAction.get());
+                    continue;
+                }
 
-                    // 批量应用变更
-                    for (AiResponseAction action : fileActions) {
-                        try {
-                            applyActionWithoutFormatting(action);
-                        } catch (Exception e) {
-                            notifyError("应用变更失败 [" + action.action() + "] -> " + action.filePath() + ": " + e.getMessage());
-                        }
-                    }
-
-                    // 格式化处理
-                    VirtualFile vf = findVirtualFile(filePath);
-                    if (vf != null) {
-                        formatFileDirectly(vf);
+                // 批量应用变更
+                for (AiResponseAction action : fileActions) {
+                    try {
+                        applyActionWithoutFormatting(action);
+                    } catch (Exception e) {
+                        notifyError("应用变更失败 [" + action.action() + "] -> " + action.filePath() + ": " + e.getMessage());
                     }
                 }
-                notifySuccess("已成功应用变更。");
-            }, "Apply AI Assistant Changes", null);
+
+                // 格式化处理
+                VirtualFile vf = findVirtualFile(filePath);
+                if (vf != null) {
+                    formatFileDirectly(vf);
+                }
+            }
+            notifySuccess("已成功应用变更。");
         });
     }
 
@@ -515,8 +513,13 @@ public final class ChangeApplierService {
     private void formatFileDirectly(VirtualFile file) {
         PsiFile psiFile = PsiManager.getInstance(project).findFile(file);
         if (psiFile != null) {
-            CodeStyleManager.getInstance(project).reformat(psiFile);
             Document doc = FileDocumentManager.getInstance().getDocument(file);
+            if (doc != null) {
+                PsiDocumentManager pdm = PsiDocumentManager.getInstance(project);
+                pdm.doPostponedOperationsAndUnblockDocument(doc);
+                pdm.commitDocument(doc);
+            }
+            CodeStyleManager.getInstance(project).reformat(psiFile);
             if (doc != null) FileDocumentManager.getInstance().saveDocument(doc);
         }
     }
