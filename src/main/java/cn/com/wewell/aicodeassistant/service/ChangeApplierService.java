@@ -78,14 +78,55 @@ public final class ChangeApplierService {
                         }
                     }
 
-                    // 格式化处理（由于缩进已智能调整，有时可以不用强行全局格式化，但为了兜底仍保留）
+                    // 格式化处理
                     VirtualFile vf = findVirtualFile(filePath);
                     if (vf != null) {
                         formatFileDirectly(vf);
                     }
                 }
-                notifySuccess("已成功应用 " + actions.size() + " 个变更。");
+                notifySuccess("已成功应用变更。");
             }, "Apply AI Assistant Changes", null);
+        });
+    }
+
+    /**
+     * 检测变更是否可以匹配到目标文件
+     */
+    public boolean checkMatchStatus(AiResponseAction action) {
+        String actionType = action.action().toUpperCase();
+        if ("CREATE".equals(actionType)) return true;
+
+        VirtualFile vf = findVirtualFile(action.filePath());
+        if (vf == null || !vf.exists()) return "OVERWRITE".equals(actionType);
+
+        if ("OVERWRITE".equals(actionType) && (action.oldCodeBlock() == null || action.oldCodeBlock().isEmpty())) {
+            return true;
+        }
+
+        try {
+            Document doc = FileDocumentManager.getInstance().getDocument(vf);
+            if (doc == null) return false;
+            String content = doc.getText();
+            String newContent = applyChangeToContent(content, action);
+            return !content.equals(newContent);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * 应用单个变更
+     */
+    public void applySingleAction(AiResponseAction action) {
+        WriteCommandAction.runWriteCommandAction(project, () -> {
+            try {
+                applyActionWithoutFormatting(action);
+                // 格式化处理
+                VirtualFile vf = findVirtualFile(action.filePath());
+                if (vf != null) formatFileDirectly(vf);
+            } catch (Exception e) {
+                notifyError("应用变更失败: " + e.getMessage());
+            }
         });
     }
 
@@ -94,12 +135,16 @@ public final class ChangeApplierService {
 
         if ("CREATE".equals(actionType)) {
             applyCreateWithoutFormatting(action);
+            action.setApplied(true);
             return;
         }
 
         if ("DELETE".equals(actionType) && (action.oldCodeBlock() == null || action.oldCodeBlock().isEmpty())) {
             VirtualFile file = findVirtualFile(action.filePath());
-            if (file != null && file.exists()) file.delete(this);
+            if (file != null && file.exists()) {
+                file.delete(this);
+                action.setApplied(true);
+            }
             return;
         }
 
@@ -111,6 +156,7 @@ public final class ChangeApplierService {
 
         if (!oldContent.equals(newContent)) {
             document.setText(newContent);
+            action.setApplied(true);
         }
     }
 
@@ -202,21 +248,18 @@ public final class ChangeApplierService {
     }
 
     private String buildFlexibleRegex(String oldCodeBlock) {
-        String normalized = oldCodeBlock.replaceAll("\\s+/>", "/>");
-        String[] tokens = normalized.trim().split("\\s+");
+        String[] tokens = oldCodeBlock.trim().split("\\s+");
         StringBuilder regex = new StringBuilder();
 
         for (int i = 0; i < tokens.length; i++) {
             if (tokens[i].isEmpty()) continue;
-            if (i > 0) regex.append("\\s+");
+            if (i > 0) regex.append("\\s*");
 
             String token = tokens[i];
-            if (token.endsWith("/>")) {
-                String prefix = token.substring(0, token.length() - 2);
-                regex.append(escapeTokenForRegex(prefix)).append("\\s*/").append(">");
-            } else {
-                regex.append(escapeTokenForRegex(token));
-            }
+            String escaped = escapeTokenForRegex(token);
+            // 允许 /> 前面有可选的空白符，无论它在 token 的哪个位置
+            escaped = escaped.replace("/\\>", "\\s*/\\>");
+            regex.append(escaped);
         }
         return regex.toString();
     }
@@ -237,11 +280,42 @@ public final class ChangeApplierService {
     }
 
     private String applyToExactPosition(String targetCode, int startPos, int endPos, String matchedContent, String newCodeBlock, String actionType) {
-        if ("DELETE".equals(actionType)) {
-            return targetCode.substring(0, startPos) + targetCode.substring(endPos);
+        int actualStartPos = startPos;
+        String indent = "";
+        for (int i = startPos - 1; i >= 0; i--) {
+            char c = targetCode.charAt(i);
+            if (c == ' ' || c == '\t') {
+                indent = c + indent;
+                actualStartPos = i;
+            } else if (c == '\n' || c == '\r') {
+                break;
+            } else {
+                indent = "";
+                actualStartPos = startPos;
+                break;
+            }
         }
 
-        String indent = detectIndent(matchedContent);
+        if ("DELETE".equals(actionType)) {
+            int actualEndPos = endPos;
+            for (int i = endPos; i < targetCode.length(); i++) {
+                char c = targetCode.charAt(i);
+                if (c == ' ' || c == '\t') {
+                    actualEndPos = i + 1;
+                } else if (c == '\n' || c == '\r') {
+                    actualEndPos = i + 1;
+                    if (c == '\r' && i + 1 < targetCode.length() && targetCode.charAt(i + 1) == '\n') {
+                        actualEndPos = i + 2;
+                    }
+                    break;
+                } else {
+                    actualEndPos = endPos;
+                    break;
+                }
+            }
+            return targetCode.substring(0, actualStartPos) + targetCode.substring(actualEndPos);
+        }
+
         String adjustedNewCode = adjustIndent(newCodeBlock, indent);
 
         if ("INSERT_AFTER".equals(actionType)) {
@@ -249,34 +323,8 @@ public final class ChangeApplierService {
             return targetCode.substring(0, endPos) + adjustedNewCode + targetCode.substring(endPos);
         }
 
-        // UPDATE 处理前后空白保留
-        String leadingWhitespace = "";
-        String trailingWhitespace = "";
-
-        for (int i = 0; i < matchedContent.length(); i++) {
-            char c = matchedContent.charAt(i);
-            if (c == '\n' || c == '\r') {
-                leadingWhitespace += c;
-            } else if (Character.isWhitespace(c) && leadingWhitespace.contains("\n")) {
-                break;
-            } else if (Character.isWhitespace(c)) {
-                leadingWhitespace += c;
-            } else {
-                break;
-            }
-        }
-
-        for (int i = matchedContent.length() - 1; i >= 0; i--) {
-            char c = matchedContent.charAt(i);
-            if (c == '\n' || c == '\r' || Character.isWhitespace(c)) {
-                trailingWhitespace = c + trailingWhitespace;
-            } else {
-                break;
-            }
-        }
-
-        String finalNewCode = leadingWhitespace + adjustedNewCode + trailingWhitespace;
-        return targetCode.substring(0, startPos) + finalNewCode + targetCode.substring(endPos);
+        // UPDATE
+        return targetCode.substring(0, actualStartPos) + adjustedNewCode + targetCode.substring(endPos);
     }
 
     private String tryAlternativeMatch(String targetCode, String oldCodeBlock, String newCodeBlock, String actionType) {
@@ -295,10 +343,11 @@ public final class ChangeApplierService {
         double bestSimilarity = 0.0;
 
         for (int i = 0; i < targetLines.length; i++) {
-            for (int j = i + Math.max(0, oldNonEmptyLines - 3); j < Math.min(targetLines.length, i + oldNonEmptyLines + 5); j++) {
+            // 扩大搜索窗口以处理目标代码与原始代码格式差异较大（例如多行与单行）的情况
+            for (int j = i + Math.max(0, oldNonEmptyLines / 2 - 2); j < Math.min(targetLines.length, i + oldNonEmptyLines * 3 + 5); j++) {
                 StringBuilder window = new StringBuilder();
                 for (int k = i; k <= j; k++) {
-                    window.append(targetLines[k]).append("\n");
+                    window.append(targetLines[k]);
                 }
 
                 String normalizedWindow = normalizeForMatching(window.toString());
@@ -362,11 +411,8 @@ public final class ChangeApplierService {
     }
 
     private String normalizeForMatching(String code) {
-        return code.replaceAll("\\s+", " ")
-                   .replace('"', '\'')
-                   .replace("/>", " />")
-                   .replaceAll("\\s+/>", " />")
-                   .trim();
+        // 完全移除空格进行对比，最大限度忽略格式差异
+        return code.replaceAll("\\s+", "").replace('"', '\'');
     }
 
     private double calculateSimilarity(String s1, String s2) {

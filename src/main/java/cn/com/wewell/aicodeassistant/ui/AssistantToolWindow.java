@@ -255,6 +255,13 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
                         if (uo instanceof AiResponseAction action) {
                             DefaultActionGroup group = new DefaultActionGroup();
                             group.add(new cn.com.wewell.aicodeassistant.action.tree.CompareAction(node));
+                            group.add(new AnAction("应用此变更", "应用此单项变更", com.intellij.icons.AllIcons.Actions.Checked) {
+                                @Override
+                                public void actionPerformed(@NotNull AnActionEvent e1) {
+                                    cn.com.wewell.aicodeassistant.service.ChangeApplierService.getInstance(project).applySingleAction(action);
+                                    ((DefaultTreeModel) changesTree.getModel()).nodeChanged(node);
+                                }
+                            });
                             group.addSeparator();
                             group.add(new cn.com.wewell.aicodeassistant.action.tree.CopyNewContentAction(node));
                             group.add(new cn.com.wewell.aicodeassistant.action.tree.CopyOldContentAction(node));
@@ -310,8 +317,14 @@ public class AssistantToolWindow extends SimpleToolWindowPanel {
                         return;
                     }
 
-                    if (node.isLeaf()) node = (DefaultMutableTreeNode) node.getParent();
-                    if (node != null && node.getUserObject() instanceof FileChanges fileChanges) {
+                    if (uo instanceof AiResponseAction action) {
+                        // 双击叶子节点：只展示单条变更的对比
+                        DiffPresentationService.getInstance(project).showDiffForFile(List.of(action));
+                        return;
+                    }
+
+                    if (uo instanceof FileChanges fileChanges) {
+                        // 双击文件名称：展示该文件全部变更的应用对比情况
                         if (!fileChanges.getActions().isEmpty()) {
                             DiffPresentationService.getInstance(project).showDiffForFile(fileChanges.getActions());
                         }

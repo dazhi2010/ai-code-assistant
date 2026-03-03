@@ -16,6 +16,8 @@ public class AiResponseAction {
     private String oldCodeBlock;
     private String newCodeBlock;
     private String explanation;
+    private boolean matched = true;
+    private boolean applied = false;
 
     // Getter and Setter
     public String action() { return action; }
@@ -44,6 +46,12 @@ public class AiResponseAction {
 
     public String explanation() { return explanation; }
     public void setExplanation(String explanation) { this.explanation = explanation; }
+
+    public boolean isMatched() { return matched; }
+    public void setMatched(boolean matched) { this.matched = matched; }
+
+    public boolean isApplied() { return applied; }
+    public void setApplied(boolean applied) { this.applied = applied; }
     
     // 兼容之前的 record 方法调用风格
     public String getAction() { return action; }

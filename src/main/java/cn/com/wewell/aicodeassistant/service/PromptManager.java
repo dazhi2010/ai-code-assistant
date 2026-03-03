@@ -80,6 +80,12 @@ public final class PromptManager {
     private Consumer<String> inputListener;
     private Consumer<String> outputListener;
 
+    private final Project project;
+
+    public PromptManager(Project project) {
+        this.project = project;
+    }
+
     public static PromptManager getInstance(Project project) {
         return project.getService(PromptManager.class);
     }
@@ -227,12 +233,15 @@ public final class PromptManager {
                     
                     // 填充 CREATE/OVERWRITE 的 content 字段
                     if (parsedActions != null) {
+                        ChangeApplierService applier = ChangeApplierService.getInstance(project);
                         for (AiResponseAction action : parsedActions) {
                             if (("CREATE".equalsIgnoreCase(action.action()) || "OVERWRITE".equalsIgnoreCase(action.action()))
                                     && (action.content() == null || action.content().isBlank())
                                     && action.newCodeBlock() != null) {
                                 action.setContent(action.newCodeBlock());
                             }
+                            // 初始化匹配状态
+                            action.setMatched(applier.checkMatchStatus(action));
                         }
                     }
                 }

@@ -21,11 +21,19 @@ public class ChangeTreeCellRenderer extends ColoredTreeCellRenderer {
             Object userObject = ((DefaultMutableTreeNode) value).getUserObject();
 
             if (userObject instanceof AiResponseAction action) {
-                // 叶子节点（具体操作）
-                setIcon(AllIcons.Actions.Diff);
+                // 1. 设置图标（如果已应用则显示打钩）
+                if (action.isApplied()) {
+                    setIcon(AllIcons.Actions.Checked);
+                } else {
+                    setIcon(AllIcons.Actions.Diff);
+                }
 
-                // 1. 显示操作类型
-                append(action.action().toUpperCase(), SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES);
+                // 2. 显示操作类型，根据匹配状态设置颜色
+                SimpleTextAttributes actionAttributes = action.isMatched() ?
+                        new SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, com.intellij.ui.JBColor.GREEN) :
+                        new SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, com.intellij.ui.JBColor.RED);
+
+                append(action.action().toUpperCase(), actionAttributes);
                 append(" ");
 
                 // 2. 添加上下文信息（不再显示文件路径）
