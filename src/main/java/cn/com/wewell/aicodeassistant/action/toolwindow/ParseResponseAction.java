@@ -33,23 +33,59 @@ public class ParseResponseAction extends AnAction implements DumbAware {
         }
         AssistantToolWindow assistantToolWindow = (AssistantToolWindow) toolWindow.getContentManager().getContent(0).getComponent();
 
-        PromptManager promptManager = PromptManager.getInstance(project);
-        boolean success = promptManager.parseResponse();
+        com.intellij.openapi.progress.ProgressManager.getInstance().run(new com.intellij.openapi.progress.Task.Backgroundable(project, "正在解析 AI 响应...", true) {
+            private boolean success = false;
+            private List<AiResponseAction> actions;
 
-        if (success) {
-            List<AiResponseAction> actions = promptManager.getParsedActions();
-            assistantToolWindow.showChangesPreview(actions.stream().collect(Collectors.groupingBy(AiResponseAction::filePath)));
-            
-            String msg = (actions.isEmpty() && promptManager.getRequiredFiles().isEmpty() && promptManager.getRequiredClasses().isEmpty()) 
-                    ? "解析成功，已在右侧面板显示对话内容" 
-                    : "解析成功，请在右侧面板预览变更";
-            
-            NotificationGroupManager.getInstance().getNotificationGroup(Constants.NOTIFICATION_GROUP_ID)
-                    .createNotification(msg, NotificationType.INFORMATION).notify(project);
-        } else {
-            assistantToolWindow.showJsonInputView();
-            NotificationGroupManager.getInstance().getNotificationGroup(Constants.NOTIFICATION_GROUP_ID)
-                    .createNotification("JSON解析失败，请检查格式", NotificationType.ERROR).notify(project);
-        }
-    }
-}
+            @Override
+            public void run(@NotNull com.intellij.openapi.progress.ProgressIndicator indicator) {
+                indicator.setIndeterminate(true);
+                PromptManager promptManager = PromptManager.getInstance(project);
+                
+                // 使用 ReadAction 包裹，因为 parseResponse 内部会调用 checkMatchStatus 读取文件 Document
+                success = com.intellij.openapi.application.ReadAction.compute(() -> {
+                    try {
+                        return promptManager.parseResponse();
+                    } catch (com.intellij.openapi.progress.ProcessCanceledException ex) {
+                        return false;
+                    }
+                });
+                
+                if (success) {
+                    actions = promptManager.getParsedActions();
+                }
+            }
+
+            @Override
+            public void onSuccess() {
+                com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater(() -> {
+                    if (project.isDisposed()) return;
+                    
+                    if (success && actions != null) {
+                        PromptManager promptManager = PromptManager.getInstance(project);
+                        assistantToolWindow.showChangesPreview(actions.stream().collect(Collectors.groupingBy(AiResponseAction::filePath)));
+
+                        String msg = (actions.isEmpty() && promptManager.getRequiredFiles().isEmpty() && promptManager.getRequiredClasses().isEmpty())
+                                ? "解析成功，已在右侧面板显示对话内容"
+                                : "解析成功，请在右侧面板预览变更";
+
+                        NotificationGroupManager.getInstance().getNotificationGroup(Constants.NOTIFICATION_GROUP_ID)
+                                .createNotification(msg, NotificationType.INFORMATION).notify(project);
+                    } else {
+                        assistantToolWindow.showJsonInputView();
+                        NotificationGroupManager.getInstance().getNotificationGroup(Constants.NOTIFICATION_GROUP_ID)
+                                .createNotification("解析未完成或被取消", NotificationType.WARNING).notify(project);
+                    }
+                });
+            }
+
+            @Override
+            public void onCancel() {
+                com.intellij.openapi.application.ApplicationManager.getApplication().invokeLater(() -> {
+                    assistantToolWindow.showJsonInputView();
+                    NotificationGroupManager.getInstance().getNotificationGroup(Constants.NOTIFICATION_GROUP_ID)
+                            .createNotification("解析已取消", NotificationType.WARNING).notify(project);
+                });
+            }
+        });
+    }}

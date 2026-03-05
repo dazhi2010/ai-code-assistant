@@ -20,10 +20,7 @@ import com.intellij.psi.codeStyle.CodeStyleManager;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -327,9 +324,23 @@ public final class ChangeApplierService {
 
     private String tryAlternativeMatch(String targetCode, String oldCodeBlock, String newCodeBlock, String actionType) {
         String normalizedOld = normalizeForMatching(oldCodeBlock);
-
         String[] targetLines = targetCode.split("\n", -1);
         String[] oldLines = oldCodeBlock.split("\n");
+
+        // 预处理所有行的标准化内容
+        String[] normalizedTargetLines = new String[targetLines.length];
+        for (int i = 0; i < targetLines.length; i++) {
+            normalizedTargetLines[i] = normalizeForMatching(targetLines[i]);
+        }
+
+        // 提取旧代码块的第一行非空行作为“锚点”参考
+        String anchorLine = "";
+        for (String line : oldLines) {
+            if (!line.trim().isEmpty()) {
+                anchorLine = normalizeForMatching(line);
+                break;
+            }
+        }
 
         int oldNonEmptyLines = 0;
         for (String line : oldLines) {
@@ -340,31 +351,50 @@ public final class ChangeApplierService {
         int endLine = -1;
         double bestSimilarity = 0.0;
 
-        for (int i = 0; i < targetLines.length; i++) {
-            // 扩大搜索窗口以处理目标代码与原始代码格式差异较大（例如多行与单行）的情况
-            for (int j = i + Math.max(0, oldNonEmptyLines / 2 - 2); j < Math.min(targetLines.length, i + oldNonEmptyLines * 3 + 5); j++) {
-                StringBuilder window = new StringBuilder();
-                for (int k = i; k <= j; k++) {
-                    window.append(targetLines[k]);
-                }
+        // 步骤 A: 寻找潜在的锚点位置（显著减少后续计算量）
+        List<Integer> potentialAnchors = new ArrayList<>();
+        for (int i = 0; i < normalizedTargetLines.length; i++) {
+            if (normalizedTargetLines[i].contains(anchorLine) || anchorLine.contains(normalizedTargetLines[i])) {
+                potentialAnchors.add(i);
+            }
+        }
+        
+        // 如果找不到包含关系的锚点，则全量扫描，否则只扫描锚点周围
+        boolean useFullScan = potentialAnchors.isEmpty();
+        int totalIterations = useFullScan ? targetLines.length : potentialAnchors.size();
 
-                String normalizedWindow = normalizeForMatching(window.toString());
+        for (int k = 0; k < totalIterations; k++) {
+            // 在循环中检查用户是否取消了任务
+            com.intellij.openapi.progress.ProgressManager.checkCanceled();
+            
+            int i = useFullScan ? k : potentialAnchors.get(k);
+
+            StringBuilder windowNorm = new StringBuilder();
+            int maxWindow = oldNonEmptyLines * 2 + 10;
+            
+            for (int j = i; j < Math.min(targetLines.length, i + maxWindow); j++) {
+                windowNorm.append(normalizedTargetLines[j]);
                 
+                String normalizedWindow = windowNorm.toString();
                 int maxLen = Math.max(normalizedOld.length(), normalizedWindow.length());
                 if (maxLen == 0) continue;
+                
                 int lenDiff = Math.abs(normalizedOld.length() - normalizedWindow.length());
-                if (1.0 - (double) lenDiff / maxLen <= bestSimilarity) {
-                    continue;
-                }
+                // 长度差超过 30%，基本不可能是目标，快速跳过 Levenshtein
+                if ((double) lenDiff / maxLen > 0.3) continue;
+
+                // 只有当相似度可能打破记录时才计算
+                if (1.0 - (double) lenDiff / maxLen <= bestSimilarity) continue;
 
                 double similarity = calculateSimilarity(normalizedOld, normalizedWindow);
-
                 if (similarity > bestSimilarity) {
                     bestSimilarity = similarity;
                     startLine = i;
                     endLine = j;
+                    if (bestSimilarity > 0.95) break; // 足够接近了，直接采用
                 }
             }
+            if (bestSimilarity > 0.95) break;
         }
 
         if (bestSimilarity < 0.8 || startLine < 0) {
