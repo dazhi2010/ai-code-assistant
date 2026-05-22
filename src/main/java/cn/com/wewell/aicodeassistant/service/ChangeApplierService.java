@@ -50,7 +50,7 @@ public final class ChangeApplierService {
         Map<String, List<AiResponseAction>> groupedActions = actions.stream()
                 .collect(Collectors.groupingBy(AiResponseAction::filePath));
 
-        WriteCommandAction.runWriteCommandAction(project, "Apply AI Assistant Changes", null, () -> {
+        WriteCommandAction.runWriteCommandAction(project, "应用大鱼AI编程助手变更", null, () -> {
             for (Map.Entry<String, List<AiResponseAction>> entry : groupedActions.entrySet()) {
                 String filePath = entry.getKey();
                 List<AiResponseAction> fileActions = entry.getValue();
@@ -243,35 +243,32 @@ public final class ChangeApplierService {
     }
 
     private String buildFlexibleRegex(String oldCodeBlock) {
-        String[] tokens = oldCodeBlock.trim().split("\\s+");
+        String trimmed = oldCodeBlock.trim();
+        // 匹配单词（包含数字下划线）或单个非空白特殊字符
+        Pattern p = Pattern.compile("\\w+|[^\\w\\s]");
+        Matcher m = p.matcher(trimmed);
+
         StringBuilder regex = new StringBuilder();
-
-        for (int i = 0; i < tokens.length; i++) {
-            if (tokens[i].isEmpty()) continue;
-            if (i > 0) regex.append("\\s*");
-
-            String token = tokens[i];
-            String escaped = escapeTokenForRegex(token);
-            // 允许 /> 前面有可选的空白符，无论它在 token 的哪个位置
-            escaped = escaped.replace("/\\>", "\\s*/\\>");
-            regex.append(escaped);
+        boolean first = true;
+        while (m.find()) {
+            if (!first) {
+                // 仅在原子之间允许可选空白，且 Pattern.DOTALL 模式下包含换行
+                regex.append("\\s*");
+            }
+            String token = m.group();
+            if (token.equals("'") || token.equals("\"")) {
+                // 支持单双引号互换
+                regex.append("[\"']");
+            } else if (token.length() == 1 && "<>()[]{}\\^$|?*+.,;!=-/%&".indexOf(token.charAt(0)) != -1) {
+                // 转义正则表达式特殊字符
+                regex.append("\\").append(token);
+            } else {
+                // 其他普通文本（如标识符）使用精确匹配
+                regex.append(Pattern.quote(token));
+            }
+            first = false;
         }
         return regex.toString();
-    }
-
-    private String escapeTokenForRegex(String token) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < token.length(); i++) {
-            char c = token.charAt(i);
-            if (c == '"' || c == '\'') {
-                sb.append("[\"']");
-            } else if ("<>()[]{}\\^$|?*+.".indexOf(c) != -1) {
-                sb.append("\\").append(c);
-            } else {
-                sb.append(c);
-            }
-        }
-        return sb.toString();
     }
 
     private String applyToExactPosition(String targetCode, int startPos, int endPos, String matchedContent, String newCodeBlock, String actionType) {
@@ -351,7 +348,7 @@ public final class ChangeApplierService {
         int endLine = -1;
         double bestSimilarity = 0.0;
 
-        // 步骤 A: 寻找潜在的锚点位置（显著减少后续计算量）
+        // 步骤 A: 寻找潜在的锚点位置
         List<Integer> potentialAnchors = new ArrayList<>();
         for (int i = 0; i < normalizedTargetLines.length; i++) {
             if (normalizedTargetLines[i].contains(anchorLine) || anchorLine.contains(normalizedTargetLines[i])) {
@@ -359,14 +356,11 @@ public final class ChangeApplierService {
             }
         }
         
-        // 如果找不到包含关系的锚点，则全量扫描，否则只扫描锚点周围
         boolean useFullScan = potentialAnchors.isEmpty();
         int totalIterations = useFullScan ? targetLines.length : potentialAnchors.size();
 
         for (int k = 0; k < totalIterations; k++) {
-            // 在循环中检查用户是否取消了任务
             com.intellij.openapi.progress.ProgressManager.checkCanceled();
-            
             int i = useFullScan ? k : potentialAnchors.get(k);
 
             StringBuilder windowNorm = new StringBuilder();
@@ -380,10 +374,8 @@ public final class ChangeApplierService {
                 if (maxLen == 0) continue;
                 
                 int lenDiff = Math.abs(normalizedOld.length() - normalizedWindow.length());
-                // 长度差超过 30%，基本不可能是目标，快速跳过 Levenshtein
                 if ((double) lenDiff / maxLen > 0.3) continue;
 
-                // 只有当相似度可能打破记录时才计算
                 if (1.0 - (double) lenDiff / maxLen <= bestSimilarity) continue;
 
                 double similarity = calculateSimilarity(normalizedOld, normalizedWindow);
@@ -391,10 +383,12 @@ public final class ChangeApplierService {
                     bestSimilarity = similarity;
                     startLine = i;
                     endLine = j;
-                    if (bestSimilarity > 0.95) break; // 足够接近了，直接采用
+                    // 如果达到 1.0 完美匹配，可以提前结束当前锚点的查找
+                    if (bestSimilarity >= 1.0) break;
                 }
             }
-            if (bestSimilarity > 0.95) break;
+            // 如果已经找到完美匹配，可以结束所有查找
+            if (bestSimilarity >= 1.0) break;
         }
 
         if (bestSimilarity < 0.8 || startLine < 0) {

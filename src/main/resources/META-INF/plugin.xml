@@ -1,10 +1,10 @@
 <idea-plugin>
     <id>cn.com.wewell.ai-code-assistant</id>
-    <name>Ai-code-assistant</name>
+    <name>大鱼AI编程助手</name>
     <vendor url="http://www.wewell.com.cn">WeWell</vendor>
     <description>
         <![CDATA[
-        这是一个基于AI的代码助手插件，用于在IntelliJ IDEA中快速生成代码。
+        大鱼AI编程助手（Dayu AI Coding Assistant）用于在 IntelliJ IDEA 中快速收集上下文、生成提示词并应用 AI 返回的代码变更。
         <br>
         <em>most HTML tags may be used</em>
       ]]>
@@ -20,13 +20,13 @@
         <projectService serviceImplementation="cn.com.wewell.aicodeassistant.service.HistoryManager"/>
         <projectService serviceImplementation="cn.com.wewell.aicodeassistant.service.AssistantConfigService"/>
         <!-- 工具窗口 -->
-        <toolWindow id="Yuqf AI Assistant"
+        <toolWindow id="大鱼AI编程助手"
                     anchor="right"
                     factoryClass="cn.com.wewell.aicodeassistant.ui.AssistantToolWindowFactory"
                     icon="/pluginIcon.svg"/>
 
         <!-- 通知组 -->
-        <notificationGroup id="Yuqf AI Assistant Notifications"
+        <notificationGroup id="Dayu AI Coding Assistant Notifications"
                            displayType="BALLOON"/>
     </extensions>
 
@@ -34,24 +34,24 @@
         <!-- 编辑器右键菜单 -->
         <action id="AddToAIAssistant"
                 class="cn.com.wewell.aicodeassistant.action.AddToAssistantAction"
-                text="Add to AI Assistant"
-                description="Add selected code to AI Assistant">
+                text="添加到大鱼AI编程助手"
+                description="将选中的代码添加到大鱼AI编程助手">
             <add-to-group group-id="EditorPopupMenu" anchor="last"/>
             <keyboard-shortcut keymap="$default"
                                first-keystroke="ctrl shift A"/>
         </action>
         <action id="AIAssistant.AddFilesToAssistant"
                 class="cn.com.wewell.aicodeassistant.action.AddFilesToAssistantAction"
-                text="Add to AI Assistant"
-                description="Add selected file(s)/folder(s) to AI Assistant">
+                text="添加到大鱼AI编程助手"
+                description="将选中的文件或目录添加到大鱼AI编程助手">
             <add-to-group group-id="ProjectViewPopupMenu" anchor="after" relative-to-action="AddToAIAssistant"/>
         </action>
 
         <!-- 紧凑模式：以结构/签名为主，控制上下文体量 -->
         <action id="AIAssistant.AddCompactFilesToAssistant"
                 class="cn.com.wewell.aicodeassistant.action.AddCompactFilesToAssistantAction"
-                text="Add to AI Assistant (Compact)"
-                description="以紧凑模式添加选中文件/目录">
+                text="添加到大鱼AI编程助手（紧凑）"
+                description="以紧凑模式添加选中文件/目录到大鱼AI编程助手">
             <add-to-group group-id="ProjectViewPopupMenu" anchor="after" relative-to-action="AIAssistant.AddFilesToAssistant"/>
         </action>
 

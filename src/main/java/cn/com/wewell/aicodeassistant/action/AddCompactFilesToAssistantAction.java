@@ -17,7 +17,7 @@ import org.jetbrains.annotations.NotNull;
 import java.util.*;
 
 /**
- * 以“紧凑模式”将选中文件/目录添加到 AI Assistant。
+ * 以“紧凑模式”将选中文件/目录添加到大鱼AI编程助手。
  * - Java：仅签名与结构，方法体省略
  * - JS/TS/HTML/CSS：体省略或最小化
  * - 自动按 token 预算截断，防止超限
@@ -25,7 +25,7 @@ import java.util.*;
 public class AddCompactFilesToAssistantAction extends AnAction implements DumbAware {
 
     public AddCompactFilesToAssistantAction() {
-        super("Add to AI Assistant (Compact)", "以紧凑模式添加选中文件/目录到 AI Assistant", null);
+        super("添加到大鱼AI编程助手（紧凑）", "以紧凑模式添加选中文件/目录到大鱼AI编程助手", null);
     }
 
     @Override

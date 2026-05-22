@@ -2,8 +2,8 @@ package cn.com.wewell.aicodeassistant.common;
 
 public final class Constants {
     // 将您在 plugin.xml 中定义的 ID 放在这里
-    public static final String TOOL_WINDOW_ID = "Yuqf AI Assistant";
-    public static final String NOTIFICATION_GROUP_ID = "Yuqf AI Assistant Notifications";
+    public static final String TOOL_WINDOW_ID = "大鱼AI编程助手";
+    public static final String NOTIFICATION_GROUP_ID = "Dayu AI Coding Assistant Notifications";
 
     // 中文注释：AI 助手的工作目录及配置文件
     public static final String ASSISTANT_DIR = ".ai-assistant";
