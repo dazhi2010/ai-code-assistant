@@ -22,13 +22,13 @@ public final class PromptManager {
 
     private static final String PROMPT_TEMPLATE = """
             # ROLE
-            你是一位资深的 Java 专家。
+            你是一位资深的 %s。
             你的目标是基于用户提供的上下文，提供安全、优雅且符合工程规范的代码方案。
 
             # CONSTRAINTS & STANDARDS
             1. **最小影响原则**：严禁进行无关的格式化、重构或空行调整。只修改与需求直接相关的代码。
             2. **安全准则**：严禁硬编码 API 密钥、密钥对或绝对本地路径。
-            3. **代码风格**：注释必须使用中文，新创建的文件需标注 `@author yuqf`。
+            3. **代码风格**：注释必须使用中文，新创建的文件需标注 `@author %s`。
             4. **唯一性定位**：在 `UPDATE` 操作中，`oldCodeBlock` 必须在目标文件中唯一存在。如有必要，请在前后包含若干行上下文（包括方法签名、特有的逻辑行等）以确保定位精准。
 
             # RESPONSE PROTOCOL
@@ -116,7 +116,13 @@ public final class PromptManager {
 
     public void generateFullPrompt() {
         String dataContent = inputContent.toString();
-        String finalPrompt = String.format(PROMPT_TEMPLATE, dataContent);
+        AssistantConfigService configService = AssistantConfigService.getInstance(project);
+        String finalPrompt = String.format(
+                PROMPT_TEMPLATE,
+                configService.getPromptExpertRole(),
+                configService.getAuthorName(),
+                dataContent
+        );
         inputContent.setLength(0);
         inputContent.append(finalPrompt);
         notifyInputListener();

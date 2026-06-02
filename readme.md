@@ -79,7 +79,7 @@ gradlew.bat runIde
 .ai-assistant/config.json
 ```
 
-配置文件当前主要用于控制“添加文件/目录到上下文”时的忽略规则。默认会忽略 `.git/`、`.idea/`、`build/`、`target/`、`node_modules/`、`*.class`、`*.jar` 等内容。
+配置文件用于控制“添加文件/目录到上下文”时的忽略规则，以及生成完整提示词时的角色和作者信息。默认会忽略 `.git/`、`.idea/`、`build/`、`target/`、`node_modules/`、`*.class`、`*.jar` 等内容。
 
 示例：
 
@@ -93,11 +93,13 @@ gradlew.bat runIde
     "node_modules/",
     "*.class",
     "*.jar"
-  ]
+  ],
+  "promptExpertRole": "JAVA专家",
+  "authorName": "yuqf"
 }
 ```
 
-修改配置后，点击工具窗口中的“刷新配置”按钮，让新的忽略规则立即生效。
+其中 `promptExpertRole` 会用于提示词开头的“你是一位资深的 ...”，`authorName` 会用于“新创建的文件需标注 `@author ...`”。修改配置后，点击工具窗口中的“刷新配置”按钮，让新的配置立即生效。
 
 ## 基本使用流程
 

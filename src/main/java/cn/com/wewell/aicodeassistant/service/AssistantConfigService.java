@@ -31,6 +31,9 @@ import java.util.regex.Pattern;
 @Service(Service.Level.PROJECT)
 public final class AssistantConfigService {
 
+    private static final String DEFAULT_PROMPT_EXPERT_ROLE = "JAVA专家";
+    private static final String DEFAULT_AUTHOR_NAME = "yuqf";
+
     private final Project project;
     private final Gson gson = new Gson();
     private volatile AssistantConfig cachedConfig;
@@ -56,7 +59,7 @@ public final class AssistantConfigService {
                 VirtualFile dir = VfsUtil.createDirectories(dirPath);
                 VirtualFile cfg = dir.findChild(Constants.CONFIG_FILE);
                 if (cfg == null || cfg.getLength() == 0) {
-                    AssistantConfig defaultCfg = new AssistantConfig(defaultIgnores());
+                    AssistantConfig defaultCfg = defaultConfig();
                     byte[] bytes = gson.toJson(defaultCfg).getBytes(StandardCharsets.UTF_8);
                     if (cfg == null) {
                         cfg = dir.createChildData(this, Constants.CONFIG_FILE);
@@ -86,6 +89,22 @@ public final class AssistantConfigService {
         AssistantConfig cfg = loadConfig();
         if (cfg == null || cfg.ignore() == null) return Collections.emptyList();
         return cfg.ignore();
+    }
+
+    public String getPromptExpertRole() {
+        AssistantConfig cfg = loadConfig();
+        if (cfg == null || cfg.promptExpertRole() == null || cfg.promptExpertRole().isBlank()) {
+            return DEFAULT_PROMPT_EXPERT_ROLE;
+        }
+        return cfg.promptExpertRole().trim();
+    }
+
+    public String getAuthorName() {
+        AssistantConfig cfg = loadConfig();
+        if (cfg == null || cfg.authorName() == null || cfg.authorName().isBlank()) {
+            return DEFAULT_AUTHOR_NAME;
+        }
+        return cfg.authorName().trim();
     }
 
     /**
@@ -132,11 +151,15 @@ public final class AssistantConfigService {
         try {
             String json = VfsUtilCore.loadText(cfgFile);
             AssistantConfig cfg = gson.fromJson(json, AssistantConfig.class);
-            cachedConfig = cfg != null ? cfg : new AssistantConfig(defaultIgnores());
+            cachedConfig = cfg != null ? cfg : defaultConfig();
         } catch (IOException | JsonSyntaxException e) {
-            cachedConfig = new AssistantConfig(defaultIgnores());
+            cachedConfig = defaultConfig();
         }
         return cachedConfig;
+    }
+
+    private AssistantConfig defaultConfig() {
+        return new AssistantConfig(defaultIgnores(), DEFAULT_PROMPT_EXPERT_ROLE, DEFAULT_AUTHOR_NAME);
     }
 
     /**
